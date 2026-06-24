@@ -53,6 +53,7 @@ This is the Lago deploy repo. The gates are matched to what actually lives here:
 |---|---|
 | `pins`         | No floating versions. Every `package.json` dep, Docker image, and `@latest` install is pinned to an exact version. **(This is the "stop pulling latest" rule you asked for.)** |
 | `go`           | The Go **events-processor** is formatted, vets clean, builds, and its unit tests pass. |
+| `accounting`   | The outbound **accounting** exactly-once contract holds (`integrations/accounting/`) — given event X, the selected target books entry Y once. Pure Go, runs everywhere. |
 | `connectors`   | The Redpanda Connect configs (`connectors/*.yml`) are valid. |
 | `compose`      | Every `docker-compose*.yml` parses, Dockerfiles lint, shell scripts have no syntax errors. |
 | `deploy-check` | **Kamal is exactly 2.11.0**, `config/deploy.yml` is valid, and the **Helm chart** lints + templates. |
@@ -81,7 +82,8 @@ A gate can come back three ways: **PASS** (green), **FAIL** (red), or **SKIP**
 
 In a fresh sandbox with no extra tools, `make verify` is green and
 `make verify-strict` is red — that's correct and expected. You make STRICT green by
-installing the tools in section 7 and clearing the debt in section 6.
+installing the tools in section 7. (The reviewed pin baseline in section 6 is
+accepted and does not block; only "couldn't check" skips fail STRICT.)
 
 ---
 
@@ -146,10 +148,10 @@ gate forbids it:
 - compose files → every `image:` has a pinned tag.
 
 **Pre-existing debt.** When we turned the gate on, the repo already had a few
-floats (e.g. `portainer/portainer-ce:latest`, `pnpm@latest`). Rather than block you
-on day one, those exact items are listed in
-[`repo-gates/pins-allow.txt`](repo-gates/pins-allow.txt) and shown every run as
-**tracked debt**. New floats fail immediately; STRICT fails the tracked ones too.
+floats (e.g. `portainer/portainer-ce:latest`, `pnpm@latest`). Those exact items are
+a **reviewed baseline** in [`repo-gates/pins-allow.txt`](repo-gates/pins-allow.txt):
+printed every run as `[BASE]`, but **non-blocking even under STRICT** — they're
+accepted, not hidden. Any **new** float fails immediately, even in normal mode.
 
 **To clear a debt:** pin it to a real version, then delete its line from
 `pins-allow.txt`. Goal: that file becomes empty.
@@ -224,6 +226,7 @@ make verify         # run all gates (normal)
 make verify-strict  # run all gates (STRICT = the real verdict; CI uses this)
 make pins           # just the no-floating-versions gate
 make go             # just the Go events-processor gate
+make accounting     # just the outbound accounting exactly-once contract
 make deploy-check   # just the Kamal 2.11.0 + Helm gate
 make smoke          # live: does the API actually answer /health?
 make harden         # let Claude fix until green   (bills Anthropic)
