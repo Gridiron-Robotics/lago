@@ -49,15 +49,39 @@ Wire it into an MCP client, e.g. Claude Desktop `claude_desktop_config.json`:
 }
 ```
 
+## HTTP transport (Gateway "Contract A")
+
+For the langgraph brain (and any network gateway) the server ALSO speaks the
+uniform Gateway HTTP Contract v1 — the same three routes every ERP module
+exposes. stdio stays available for desktop use.
+
+```bash
+LAGO_API_URL=… LAGO_API_KEY=… ./lago-mcp -http            # default :8037
+LAGO_API_URL=… LAGO_API_KEY=… LAGO_MCP_HTTP_ADDR=:8037 ./lago-mcp
+```
+
+| Verb | Shape |
+|---|---|
+| List | `GET /tools?server=lago` → `{"tools":[{name,description,input_schema,annotations:{destructiveHint:false}}]}` (unknown `server` → empty list) |
+| Invoke | `POST /invoke` `{"server","tool","arguments"}` → `{"tool","result"}` (+ `"replayed":true` on idempotent replay) |
+| Health | `HEAD /` → 200 |
+
+Headers on `/tools` + `/invoke`: `Authorization: Bearer <jwt>` (required at the
+boundary; `LAGO_API_KEY` remains the downstream Lago credential), `X-Tenant-Id`
+(default `default`), `Idempotency-Key` (replay dedup). Errors are non-2xx JSON
+`{"error":…}`: 400 bad body / handler error, 401 missing bearer, 404 unknown
+tool/server. All tools are read-only, so `destructiveHint` is always `false`.
+
 ## Files
 
 | File | Role |
 |---|---|
 | `server.go` | minimal MCP server: JSON-RPC over stdio (`initialize`/`tools/list`/`tools/call`/`ping`) |
+| `http.go` | Contract A HTTP surface (`GET /tools`, `POST /invoke`, `HEAD /`) reusing the same tools |
 | `lagoclient.go` | **GET-only** Lago REST client (the read-only choke point) |
 | `tools.go` | the six read tool definitions + handlers |
-| `cmd/lago-mcp/main.go` | wires env → client → server → stdio |
-| `*_test.go` | JSON-RPC handshake, GET-only invariant, tool dispatch |
+| `cmd/lago-mcp/main.go` | wires env → client → server → stdio (+ optional HTTP) |
+| `*_test.go` | JSON-RPC handshake, GET-only invariant, tool dispatch, HTTP contract |
 
 ## Extending it (later, with guard rails)
 
