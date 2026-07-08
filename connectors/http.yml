@@ -5,6 +5,16 @@ input:
     path: /events
     allowed_verbs:
       - POST
+    # Authenticate the ingest endpoint. Without this, any peer that can reach
+    # :3000 could POST billing events. Fail closed: enabled by default — set the
+    # credentials before exposing it (INGEST_PASSWORD_HASH is a hash, not the
+    # plaintext; see connectors/README.md).
+    basic_auth:
+      enabled: ${INGEST_BASIC_AUTH_ENABLED:true}
+      username: "${INGEST_USERNAME}"
+      password_hash: "${INGEST_PASSWORD_HASH}"
+      algorithm: "${INGEST_PASSWORD_ALGORITHM:sha256}"
+      salt: "${INGEST_PASSWORD_SALT}"
 
 pipeline:
   processors:
@@ -22,7 +32,7 @@ output:
 processor_resources:
   - label: lago_event_mapping
     mapping: |
-      root.organization_id = this.event.organization_id
+      root.organization_id = "${ORGANIZATION_ID}"
       root.external_subscription_id = this.event.external_subscription_id
       root.transaction_id = this.event.transaction_id
       root.code = this.event.code

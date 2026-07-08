@@ -69,10 +69,24 @@
 
 ## HTTP Server
 
+Like the SQS and Kinesis connectors, the HTTP ingestor is **per-tenant**: the
+organization is set server-side from `ORGANIZATION_ID`, never taken from the
+request body — so a caller cannot inject events for another organization. The
+`/events` endpoint is protected by **HTTP Basic auth** (fail-closed: enabled by
+default; set the credentials before exposing it). Provide a password *hash*, not
+the plaintext — e.g. `echo -n "$PASS$SALT" | sha256sum` for `sha256`, or a
+`bcrypt` hash (with `INGEST_PASSWORD_ALGORITHM=bcrypt`, no salt).
+
 ### Environment Variables
 
 |Environment Variable|Description|Required|
 |---|---|---|
+|ORGANIZATION_ID|Lago organization ID this ingestor writes events for|Yes|
+|INGEST_USERNAME|Basic-auth username for `POST /events`|Yes|
+|INGEST_PASSWORD_HASH|Basic-auth password **hash** (see `INGEST_PASSWORD_ALGORITHM`)|Yes|
+|INGEST_PASSWORD_ALGORITHM|Hash algorithm: `sha256` (default), `md5`, `bcrypt`, `scrypt`|No|
+|INGEST_PASSWORD_SALT|Salt for `sha256`/`scrypt` (not used for `bcrypt`)|If sha256/scrypt|
+|INGEST_BASIC_AUTH_ENABLED|Disable auth only for trusted-network dev, default: true|No|
 |KAFKA_BROKERS|Redpanda Broker|Yes|
 |KAFKA_USER|Redpanda User|Yes|
 |KAFKA_PASSWORD|Redpanda Password|Yes|
