@@ -65,11 +65,26 @@ x-backend-environment: &backend-env
   LAGO_ORG_API_KEY: ${LAGO_ORG_API_KEY:-}
   GOOGLE_AUTH_CLIENT_ID: ${GOOGLE_AUTH_CLIENT_ID:-}
   GOOGLE_AUTH_CLIENT_SECRET: ${GOOGLE_AUTH_CLIENT_SECRET:-}
+  # --- ERP single-login (Keycloak `erp` realm) -------------------------------
+  # Strict gate: default OFF, so this file behaves exactly as upstream Lago.
+  # When LAGO_ERP_SSO_STRICT=true (set via deploy/.env.erp-sso), the API fork
+  # validates the Keycloak RS256 Bearer JWT that oauth2-proxy injects at the SSO
+  # gateway (billing.gridironrobotics.com) and disables local login + Google
+  # OAuth. See deploy/ERP-SSO.md for the exact fork changes these vars drive.
+  LAGO_ERP_SSO_STRICT: ${LAGO_ERP_SSO_STRICT:-false}
+  KEYCLOAK_ISSUER: ${KEYCLOAK_ISSUER:-}
+  KEYCLOAK_JWKS_URL: ${KEYCLOAK_JWKS_URL:-}
+  KEYCLOAK_AUDIENCE: ${KEYCLOAK_AUDIENCE:-}
+  ERP_DASHBOARD_URL: ${ERP_DASHBOARD_URL:-}
 
 x-frontend-environment: &frontend-env
   API_URL: https://${LAGO_DOMAIN}
   APP_ENV: production
   LAGO_OAUTH_PROXY_URL: https://proxy.getlago.com
+  # ERP single-login: when true the front reads the Bearer token from the ERP
+  # shell / oauth2-proxy instead of rendering Lago's own login form. Default OFF.
+  LAGO_ERP_SSO_STRICT: ${LAGO_ERP_SSO_STRICT:-false}
+  ERP_DASHBOARD_URL: ${ERP_DASHBOARD_URL:-}
 
 services:
   traefik:

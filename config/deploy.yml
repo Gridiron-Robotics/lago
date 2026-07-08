@@ -115,6 +115,15 @@ env:
     LAGO_REDIS_CACHE_URL: redis://lago-redis:6379
     LAGO_SIDEKIQ_WEB: "true"
     LAGO_DISABLE_SIGNUP: "true"
+    # ERP single-login (Keycloak `erp` realm). Default OFF keeps upstream Lago
+    # behavior; flip LAGO_ERP_SSO_STRICT to "true" once the fork is checked out
+    # to validate the injected Keycloak Bearer JWT and disable local login.
+    # See deploy/ERP-SSO.md. KEYCLOAK_* / ERP_DASHBOARD_URL are non-secret.
+    LAGO_ERP_SSO_STRICT: "false"
+    KEYCLOAK_ISSUER: https://keycloak.gridironrobotics.com/realms/erp
+    KEYCLOAK_JWKS_URL: https://keycloak.gridironrobotics.com/realms/erp/protocol/openid-connect/certs
+    KEYCLOAK_AUDIENCE: account
+    ERP_DASHBOARD_URL: https://dashboard.gridironrobotics.com
   secret:
     - DATABASE_URL
     - REDIS_URL
