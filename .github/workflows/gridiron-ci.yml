@@ -1,0 +1,45 @@
+# .github/workflows/gridiron-ci.yml
+#
+# ONE lean CI workflow to drop into each repo. It runs on YOUR self-hosted
+# runner (zero hosted-runner minutes) and simply executes the repo's own gate
+# script — the same green/red gate maintained inside the repo. It does NOT
+# touch the upstream fork workflows; add this alongside them (and disable the
+# noisy upstream ones in Settings → Actions if you don't want them firing).
+#
+# The check this publishes is named "verify" (job id) — that's the exact
+# context string to require in branch protection.
+name: gridiron-ci
+
+on:
+  pull_request:
+  push:
+    branches: [main, master, develop]
+
+# One run per branch/PR; a new push cancels the previous run.
+concurrency:
+  group: gridiron-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: [self-hosted, linux, x64]   # your box's labels
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run the repo gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          # First gate script that exists wins (matches gridiron-ci.sh).
+          for g in repo-gates/verify.sh gates/verify.sh harden/verify.sh \
+                   tools/loop/verify.sh verify.sh; do
+            if [ -f "$g" ]; then
+              echo "::group::running $g"
+              bash "$g"
+              echo "::endgroup::"
+              exit 0
+            fi
+          done
+          echo "No gate script found in this repo — nothing to verify." >&2
+          exit 1
