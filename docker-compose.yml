@@ -29,12 +29,18 @@ x-backend-environment: &backend-env
   "LAGO_ENCRYPTION_PRIMARY_KEY": ${LAGO_ENCRYPTION_PRIMARY_KEY:-your-encryption-primary-key}
   "LAGO_ENCRYPTION_DETERMINISTIC_KEY": ${LAGO_ENCRYPTION_DETERMINISTIC_KEY:-your-encryption-deterministic-key}
   "LAGO_ENCRYPTION_KEY_DERIVATION_SALT": ${LAGO_ENCRYPTION_KEY_DERIVATION_SALT:-your-encryption-derivation-salt}
+  # Object storage → the shared self-hosted MinIO (the estate's `minio` repo,
+  # OSS MinIO as our S3 replacement — zero cloud cost). The S3 defaults below
+  # already point at it; the estate deploy sets LAGO_USE_AWS_S3=true to switch
+  # off local-disk storage. Lago's image force-path-styles when an endpoint is
+  # present. Keys are Lago's own scoped service account (svc-lago → t-*-lago);
+  # real secret comes from env/.kamal/secrets, never git.
   "LAGO_USE_AWS_S3": ${LAGO_USE_AWS_S3:-false}
-  "LAGO_AWS_S3_ACCESS_KEY_ID": ${LAGO_AWS_S3_ACCESS_KEY_ID:-azerty123456}
-  "LAGO_AWS_S3_SECRET_ACCESS_KEY": ${LAGO_AWS_S3_SECRET_ACCESS_KEY:-azerty123456}
+  "LAGO_AWS_S3_ACCESS_KEY_ID": ${LAGO_AWS_S3_ACCESS_KEY_ID:-svc-lago}
+  "LAGO_AWS_S3_SECRET_ACCESS_KEY": ${LAGO_AWS_S3_SECRET_ACCESS_KEY:-change_me_min_8_chars}
   "LAGO_AWS_S3_REGION": ${LAGO_AWS_S3_REGION:-us-east-1}
-  "LAGO_AWS_S3_BUCKET": ${LAGO_AWS_S3_BUCKET:-bucket}
-  "LAGO_AWS_S3_ENDPOINT": ${LAGO_AWS_S3_ENDPOINT}
+  "LAGO_AWS_S3_BUCKET": ${LAGO_AWS_S3_BUCKET:-t-default-lago}
+  "LAGO_AWS_S3_ENDPOINT": ${LAGO_AWS_S3_ENDPOINT:-http://minio:9000}
   "LAGO_USE_GCS": ${LAGO_USE_GCS:-false}
   "LAGO_GCS_PROJECT": ${LAGO_GCS_PROJECT:-}
   "LAGO_GCS_BUCKET": ${LAGO_GCS_BUCKET:-}
