@@ -74,12 +74,51 @@ Per the ratchet rule, each integration ships with its own gate the day it's buil
   - [ ] _Remaining:_ point each target's `*_BASE_URL`/creds at the real tenant,
         back the store with prod Redis/Postgres, and wire the target choice to the
         ERP selector UI (`AvailableTargets()` provides the options).
-- [x] **Agentic ERP — read-only MCP server BUILT.** `integrations/mcp/`
-      (`make mcp`): a stdlib-only MCP server exposing 6 Lago billing read tools to
-      AI agents over stdio. **Read-only by construction** — a test fails if any
-      tool issues a non-GET request. Validated under `-race`.
-  - [ ] _Remaining (opt-in):_ action-taking tools behind their own contract gates
-        (idempotent, allowlisted) when you want "read + guarded writes".
+- [x] **Agentic ERP — MCP server BUILT.** `integrations/mcp/` (`make mcp`): a
+      stdlib-only MCP server exposing Lago subscription + usage-based billing to AI
+      agents over stdio **and** over the estate's Gateway HTTP Contract v1.
+      Validated under `-race`.
+  - [x] _Reads are GET-only by construction_ — `LagoClient` has no mutating method
+        and its one request path hard-codes `http.MethodGet`.
+  - [x] _Action-taking tools behind contract gates:_ 4 write tools (meter a usage
+        event, start/stop a subscription, credit a wallet) — the billing lifecycle
+        an autonomous operator actually needs. Every mutation goes through one
+        audited chokepoint (`LagoWriter.do()`) that checks an explicit
+        `allowedWrites` allow-list of (method, path) pairs **before the request
+        leaves the process**; the bare collection path does not match the DELETE
+        prefix, so a truncated id cannot delete a collection.
+  - [x] _Every write is `destructiveHint: true`_ so the middleware puts a human in
+        front of it (§3A HITL). An **unknown tool defaults to destructive** — a
+        registry miss must not report a mutation as harmless.
+  - [x] _Idempotency:_ `Idempotency-Key` replay dedup, **scoped per tenant** so two
+        tenants reusing a key never cross-read each other's result. Money amounts
+        are validated as plain non-negative decimal **strings**, never floats.
+  - [x] _Write tools are registered only when the writer is configured_, so an
+        unconfigured deployment advertises no mutations rather than tools that fail
+        every call.
+  - [x] _Boundary auth is fail-closed._ The bearer is compared against
+        `LAGO_MCP_TOKEN` in constant time. Unset token ⇒ **503 on every tool
+        route** (the 503 names the variable); `LAGO_MCP_ALLOW_INSECURE=true` is the
+        explicit dev-only escape hatch, and a configured token beats it. `HEAD /`
+        stays open for liveness and leaks nothing.
+  - [x] _OpenObserve self-heal wired._ Failures emit `level=error` records with
+        `service=lago` (the stream **is** the incident module). Register with
+        `langgraph-agents/deploy/observability/apply-alerts.sh lago`. The rail fires
+        from the **handler path**, because Contract A turns every failure into
+        structured non-2xx JSON — there is no 5xx or panic for an alert to key off,
+        so a crash-based rail would report nothing while the whole surface failed.
+        Caller mistakes log at `warn`, not `error`, so malformed tool calls don't
+        bury real faults; each record carries `destructive` for triage.
+  - [x] _The gate enforces the invariant structurally_, not just by test: `make mcp`
+        fails if a non-GET request is constructed outside `lagowriter.go`, or if
+        `allowedWrites` stops being an explicit enumeration. Verified by injecting
+        a violation and confirming the gate goes red.
+  - [ ] _Remaining:_ register `lago` in the middleware `mcp_gateway/tools.py`
+        catalog and in the langgraph `INTEGRATIONS.md` manifest (both live in other
+        repos), and point `LAGO_MCP_TOKEN` at the real gateway credential.
+  - [ ] _Remaining:_ the Rails billing engine itself (`api/`, `front/`) is an empty
+        submodule here, so nothing in this repo exercises Lago's own code paths —
+        the tool surface is validated against an httptest Lago, not a live one.
 
 ### Ratchet log (add a line every time a bug slips through)
 

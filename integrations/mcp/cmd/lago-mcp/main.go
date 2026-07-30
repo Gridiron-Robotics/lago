@@ -1,5 +1,7 @@
-// Command lago-mcp is a read-only MCP server exposing Lago billing data as agent
-// tools. It always speaks JSON-RPC 2.0 over stdio (Claude Desktop, Claude Code,
+// Command lago-mcp is an MCP server exposing Lago billing as agent tools: the
+// read surface (billing data) plus the billing-lifecycle write surface (meter
+// usage, start/stop a subscription, credit a wallet), each write marked
+// destructive so the middleware puts a human in front of it. It always speaks JSON-RPC 2.0 over stdio (Claude Desktop, Claude Code,
 // etc.); when an HTTP address is configured it ALSO serves the uniform Gateway
 // HTTP Contract v1 (Contract A) so the langgraph brain can list + invoke the
 // same tools over HTTP with a Bearer token. Set LAGO_API_URL and LAGO_API_KEY.
@@ -36,8 +38,17 @@ func main() {
 		*httpAddr = defaultHTTPAddr
 	}
 
-	client := mcp.NewLagoClient(os.Getenv("LAGO_API_URL"), os.Getenv("LAGO_API_KEY"), nil)
-	server := mcp.NewServer("lago", "0.1.0", mcp.ReadOnlyTools(client))
+	apiURL, apiKey := os.Getenv("LAGO_API_URL"), os.Getenv("LAGO_API_KEY")
+	client := mcp.NewLagoClient(apiURL, apiKey, nil)
+
+	// Write tools are registered only when the writer is configured, so an
+	// unconfigured deployment advertises no mutations at all rather than tools
+	// that fail on every call.
+	tools := mcp.ReadOnlyTools(client)
+	if writer := mcp.NewLagoWriter(apiURL, apiKey, nil); writer != nil {
+		tools = append(tools, mcp.WriteTools(writer)...)
+	}
+	server := mcp.NewServer("lago", "0.1.0", tools)
 
 	if *httpAddr == "" {
 		// stdio-only: unchanged behavior.

@@ -19,11 +19,17 @@ func newHTTPStack(t *testing.T) (http.Handler, *httptest.Server) {
 		_, _ = w.Write([]byte(`{"customer":{"external_id":"cust_1"}}`))
 	}))
 	srv := NewServer("lago", "0.1.0", ReadOnlyTools(NewLagoClient(backend.URL, "k", backend.Client())))
-	return srv.HTTPHandler(), backend
+	// A configured boundary token: these tests exercise dispatch and error
+	// mapping, not auth posture. The postures themselves are covered in
+	// auth_test.go, including the fail-closed default that this bypasses.
+	return srv.httpHandlerWithAuth(authConfig{token: testBoundaryToken}), backend
 }
 
+// testBoundaryToken is the boundary credential the request helper presents.
+const testBoundaryToken = "test-jwt"
+
 func bearer(r *http.Request) *http.Request {
-	r.Header.Set("Authorization", "Bearer test-jwt")
+	r.Header.Set("Authorization", "Bearer "+testBoundaryToken)
 	return r
 }
 
@@ -85,7 +91,7 @@ func TestHTTP_ListTools_UnknownServerEmpty(t *testing.T) {
 	}
 }
 
-func TestHTTP_ListTools_RequiresBearer(t *testing.T) {
+func TestHTTP_ListTools_RequiresAcceptedBearer(t *testing.T) {
 	h, backend := newHTTPStack(t)
 	defer backend.Close()
 

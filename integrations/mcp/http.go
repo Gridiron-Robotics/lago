@@ -4,15 +4,18 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
-	"strings"
 	"sync"
 )
 
 // This file adds the uniform "Gateway HTTP Contract v1" (aka Contract A) surface
-// on top of the same read-only tools the stdio server exposes. It reuses the
-// Server's tool registry and handlers verbatim, so the read-only invariant
-// (enforced by repo-gates/mcp-gate.sh) still holds: every tool reaches Lago only
-// through LagoClient's GET-only choke point.
+// on top of the same tools the stdio server exposes, reusing the Server's tool
+// registry and handlers verbatim.
+//
+// READ tools still reach Lago only through LagoClient's GET-only choke point, so
+// they remain read-only by construction. WRITE tools (writetools.go) go through
+// LagoWriter, whose permitted mutations are enumerated in an allow-list checked
+// before the request leaves the process, and every one of them carries
+// destructiveHint so the middleware puts a human in front of it.
 //
 // Routes:
 //
@@ -20,13 +23,16 @@ import (
 //	POST /invoke               -> {"tool":<name>,"result":...} (+ "replayed":true on replay)
 //	HEAD /                     -> 200 (health)
 //
-// A Bearer token is required at the boundary on /tools and /invoke. LAGO_API_KEY
-// remains the downstream credential; the boundary token is the caller's identity
-// (a Keycloak JWT in the fleet) and is not validated here beyond presence.
+// /tools and /invoke are fail-closed: the presented bearer is compared against
+// LAGO_MCP_TOKEN in constant time, and with no token configured the surface
+// answers 503 rather than serving. See auth.go. LAGO_API_KEY remains the
+// downstream credential.
 
 // contractCatalog returns tool entries in the Contract A shape: input_schema
-// (snake_case, unlike the JSON-RPC inputSchema) plus annotations. Every Lago tool
-// is read-only, so destructiveHint is always false.
+// (snake_case, unlike the JSON-RPC inputSchema) plus annotations. destructiveHint
+// comes from the tool's own Destructive flag — it used to be hard-coded false,
+// which was true while the surface was read-only and would have silently waved
+// every write tool past the middleware approval gate the moment one was added.
 func (s *Server) contractCatalog() []map[string]any {
 	out := make([]map[string]any, 0, len(s.order))
 	for _, name := range s.order {
@@ -39,7 +45,10 @@ func (s *Server) contractCatalog() []map[string]any {
 			"name":         t.Name,
 			"description":  t.Description,
 			"input_schema": schema,
-			"annotations":  map[string]any{"destructiveHint": false},
+			"annotations": map[string]any{
+				"destructiveHint": t.Destructive,
+				"readOnlyHint":    !t.Destructive,
+			},
 		})
 	}
 	return out
@@ -60,14 +69,27 @@ func (s *Server) invokeTool(ctx context.Context, name string, args map[string]an
 
 // httpAdapter carries the per-server idempotency cache for the HTTP transport.
 type httpAdapter struct {
-	srv    *Server
-	mu     sync.Mutex
-	replay map[[2]string]map[string]any // (tenant, idempotency-key) -> payload
+	srv      *Server
+	auth     authConfig
+	reporter *Reporter
+	mu       sync.Mutex
+	replay   map[[2]string]map[string]any // (tenant, idempotency-key) -> payload
 }
 
 // HTTPHandler builds a Contract A http.Handler backed by this server's tools.
 func (s *Server) HTTPHandler() http.Handler {
-	a := &httpAdapter{srv: s, replay: make(map[[2]string]map[string]any)}
+	return s.httpHandlerWithAuth(authConfigFromEnv())
+}
+
+// httpHandlerWithAuth is HTTPHandler with the boundary credential injected, so
+// every auth posture is testable without mutating process environment.
+func (s *Server) httpHandlerWithAuth(auth authConfig) http.Handler {
+	a := &httpAdapter{
+		srv:      s,
+		auth:     auth,
+		reporter: NewReporter(nil),
+		replay:   make(map[[2]string]map[string]any),
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/tools", a.handleTools)
 	mux.HandleFunc("/invoke", a.handleInvoke)
@@ -85,12 +107,6 @@ func writeErr(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]any{"error": msg})
 }
 
-// hasBearer reports whether the request carries an Authorization: Bearer header.
-func hasBearer(r *http.Request) bool {
-	h := r.Header.Get("Authorization")
-	return len(h) > 7 && strings.EqualFold(h[:7], "Bearer ") && strings.TrimSpace(h[7:]) != ""
-}
-
 func (a *httpAdapter) handleRoot(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodHead || (r.Method == http.MethodGet && r.URL.Path == "/") {
 		w.WriteHeader(http.StatusOK)
@@ -104,8 +120,8 @@ func (a *httpAdapter) handleTools(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	if !hasBearer(r) {
-		writeErr(w, http.StatusUnauthorized, "missing bearer token")
+	if out := a.auth.authorize(r); !out.ok {
+		writeErr(w, out.status, out.message)
 		return
 	}
 	server := r.URL.Query().Get("server")
@@ -121,8 +137,8 @@ func (a *httpAdapter) handleInvoke(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	if !hasBearer(r) {
-		writeErr(w, http.StatusUnauthorized, "missing bearer token")
+	if out := a.auth.authorize(r); !out.ok {
+		writeErr(w, out.status, out.message)
 		return
 	}
 	var body struct {
@@ -169,6 +185,7 @@ func (a *httpAdapter) handleInvoke(w http.ResponseWriter, r *http.Request) {
 		a.mu.Unlock()
 	}
 
+	destructive := a.srv.isDestructive(body.Tool)
 	text, ok, err := a.srv.invokeTool(r.Context(), body.Tool, args)
 	if !ok {
 		writeErr(w, http.StatusNotFound, "unknown tool: "+body.Tool)
@@ -176,7 +193,25 @@ func (a *httpAdapter) handleInvoke(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		// Structured error back to the agent — never a 2xx with a failure inside.
-		writeErr(w, http.StatusBadRequest, err.Error())
+		//
+		// That is also why the rail is fired HERE: Contract A leaves no unhandled
+		// 5xx for an alert to key off, so without this the whole billing tool
+		// surface could be failing every call while the level=error alert saw an
+		// empty result set. Caller mistakes stay at warn — a bad argument is the
+		// agent's to fix, and paging on those buries the operational faults.
+		fields := map[string]any{
+			"tool":        body.Tool,
+			"tenant_id":   tenant,
+			"destructive": destructive,
+			"err":         err.Error(),
+		}
+		if isCallerError(err) {
+			a.reporter.Warn("mcp tool rejected", fields)
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		a.reporter.Error("mcp tool failed", fields)
+		writeErr(w, http.StatusBadGateway, err.Error())
 		return
 	}
 
@@ -188,7 +223,7 @@ func (a *httpAdapter) handleInvoke(w http.ResponseWriter, r *http.Request) {
 	} else {
 		result = text
 	}
-	payload := map[string]any{"tool": body.Tool, "result": result}
+	payload := map[string]any{"tool": body.Tool, "result": result, "destructive": destructive}
 	if idem != "" {
 		a.mu.Lock()
 		a.replay[key] = payload

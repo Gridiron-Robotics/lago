@@ -37,7 +37,23 @@ type Tool struct {
 	Name        string
 	Description string
 	InputSchema map[string]any
+	// Destructive marks a tool that MUTATES billing state. It drives
+	// destructiveHint in the Contract A catalog, which is what fires the
+	// middleware's human-approval gate — so it must be set from what the handler
+	// actually does, never inferred from the name.
+	Destructive bool
 	Handler     func(ctx context.Context, args map[string]any) (string, error)
+}
+
+// isDestructive reports a tool's Destructive flag; an UNKNOWN tool reports true.
+// Fail-safe: a tool missing from the registry must not be logged or gated as
+// harmless because a lookup missed.
+func (s *Server) isDestructive(name string) bool {
+	t, ok := s.tools[name]
+	if !ok {
+		return true
+	}
+	return t.Destructive
 }
 
 // Server is a minimal MCP server (initialize / tools/list / tools/call / ping)
