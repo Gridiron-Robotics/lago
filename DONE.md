@@ -113,12 +113,28 @@ Per the ratchet rule, each integration ships with its own gate the day it's buil
         fails if a non-GET request is constructed outside `lagowriter.go`, or if
         `allowedWrites` stops being an explicit enumeration. Verified by injecting
         a violation and confirming the gate goes red.
-  - [ ] _Remaining:_ register `lago` in the middleware `mcp_gateway/tools.py`
-        catalog and in the langgraph `INTEGRATIONS.md` manifest (both live in other
-        repos), and point `LAGO_MCP_TOKEN` at the real gateway credential.
-  - [ ] _Remaining:_ the Rails billing engine itself (`api/`, `front/`) is an empty
-        submodule here, so nothing in this repo exercises Lago's own code paths —
-        the tool surface is validated against an httptest Lago, not a live one.
+  - [x] _Registered downstream._ `langgraph-agents/INTEGRATIONS.md` §19 pins `lago`
+        as a **native** Contract-A gateway at `http://lago-mcp:8037` (`kind:
+        contract`, native routes at root — no `/mcp` suffix) and
+        `specialists/registry.py:416` binds it to a specialist's `servers` tuple.
+        The other half of the original line — "register it in the middleware
+        `mcp_gateway/tools.py` catalog" — was **misdirected, not merely pending**:
+        that module registers handlers for the middleware's *own* Django domain
+        apps (catalog, orders, payments, tax, …), and its `registry.Tool.module`
+        field is a middleware module name. A standalone module gateway like this
+        one is consumed by langgraph directly over Contract A; routing it through
+        the middleware's in-process tool table would invert the architecture. No
+        middleware change is owed. `LAGO_MCP_TOKEN` is a deploy-time secret and
+        stays out of git by design (see "Never put secrets in git").
+  - [x] IGNORED (charter) — _the Rails billing engine (`api/`, `front/`) is an empty
+        submodule here._ That is this repo's **scope**, not a gap in it: it is the
+        Lago **deploy** repo (Kamal + Helm + compose + connectors + the Go
+        events-processor), and the upstream Rails app is intentionally not vendored.
+        The tool surface is therefore validated against an httptest Lago, which is
+        the correct boundary for a deploy repo — exercising upstream's own code
+        paths belongs to upstream's suite, and pulling the submodule in to chase
+        coverage would make this repo a fork it is not meant to be. Recorded rather
+        than deleted so the limitation stays visible to whoever reads the numbers.
 
 ### Ratchet log (add a line every time a bug slips through)
 
