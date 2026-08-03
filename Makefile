@@ -28,7 +28,7 @@ go: ## Gate: Go events-processor (fmt/vet/lint/build/test)
 accounting: ## Gate: outbound accounting contract (exactly-once)
 	@./repo-gates/accounting-contract.sh || [ $$? -eq 2 ]
 
-mcp: ## Gate: read-only MCP server (agent tools, GET-only)
+mcp: ## Gate: MCP server (agent tools; reads GET-only, writes allow-listed)
 	@./repo-gates/mcp-gate.sh || [ $$? -eq 2 ]
 
 connectors: ## Gate: Redpanda Connect connector configs
