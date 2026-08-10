@@ -141,6 +141,37 @@ required argument, 502 upstream Lago failure, 503 unconfigured.
 An **unknown tool defaults to destructive** — a registry lookup that misses must
 not report a mutation as harmless.
 
+### Container
+
+The brain reaches this surface as `lago-mcp:8037` over the estate network, so it
+ships as a container in the production stack:
+
+```bash
+# The estate network is created by the master compose; for a standalone
+# bring-up it has to exist first, or compose fails for the WHOLE file.
+docker network create erp_shared_network 2>/dev/null || true
+
+docker compose -f deploy/docker-compose.production.yml up -d lago-mcp
+```
+
+Set `LAGO_MCP_TOKEN` and `LAGO_MCP_LAGO_API_KEY` in `deploy/.env.production`
+(see `deploy/.env.production.example`). The service uses `expose:`, never
+`ports:` — it fronts a billing API key and must not be published to the host.
+
+Two startup facts the image encodes, both of which otherwise produce a container
+that looks healthy while serving nothing:
+
+- `LAGO_MCP_HTTP_ADDR` must be non-empty (the image defaults it to `:8037`).
+  Empty means stdio-only, which binds no port and, with no stdin in a container,
+  returns immediately on EOF.
+- It is an env var rather than an `ENTRYPOINT` flag because `-http` is a *string*
+  flag: a bare `-http` is not "use the default", it is `flag needs an argument:
+  -http` and exit 2.
+
+The healthcheck probes `GET /`, the only route that answers 200 in every auth
+posture — including the fail-closed one the sidecar correctly sits in until
+`LAGO_MCP_TOKEN` is issued, where `/tools` answers 503 by design.
+
 ## OpenObserve self-heal
 
 Failures on this surface emit one JSON line per record with `level=error`, which

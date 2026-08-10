@@ -2,6 +2,12 @@
 .DS_Store
 .env
 .env.development
+# Filled-in deploy env files hold real secrets (LAGO_MCP_TOKEN, the Lago org API
+# key, DB/encryption keys). `.env` above does not match them: it matches the
+# basename `.env` only, so `deploy/.env.production` was tracked. Only the
+# *.example templates, which carry empty values, stay in git.
+deploy/.env*
+!deploy/.env*.example
 .rsa_private.pem
 .vscode
 .zed
