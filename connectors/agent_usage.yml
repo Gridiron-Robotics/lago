@@ -1,0 +1,84 @@
+# Agent-plane usage ingest (workstream C).
+#
+# Same shape as http.yml, dedicated to metering the AGENT plane: the langgraph
+# cost governor emits tokens / tool-call counts per tenant and this pipeline
+# turns them into Lago usage events. It is a SEPARATE endpoint from /events so the
+# two feeds can be rate-limited, credentialled and scaled independently.
+#
+# Two invariants this file exists to hold, both learned the hard way:
+#
+#  1. Org is stamped server-side from ${ORGANIZATION_ID}, never read from the
+#     request body — a caller must not be able to bill another organisation
+#     (this is what commit 6b2c56f "derive org server-side (O7)" established).
+#
+#  2. transaction_id is passed through VERBATIM and must be deterministic on the
+#     producer side (e.g. tenant + subsystem + hourly bucket). Lago deduplicates
+#     on it, so replaying the same id is safe; minting a fresh id on a retry
+#     silently double-bills the customer. The producer owns that key — this
+#     pipeline never generates one.
+input:
+  label: http_agent_usage_ingestor
+  http_server:
+    address: "0.0.0.0:3000"
+    path: /agent-usage
+    allowed_verbs:
+      - POST
+    # Authenticate the ingest endpoint. Without this, any peer that can reach
+    # :3000 could POST agent-usage events. Fail closed: enabled by default — set
+    # the credentials before exposing it (INGEST_PASSWORD_HASH is a hash, not the
+    # plaintext; see connectors/README.md). Shares the INGEST_* credentials with
+    # http.yml — it is the same trusted ingest boundary.
+    basic_auth:
+      enabled: ${INGEST_BASIC_AUTH_ENABLED:true}
+      username: "${INGEST_USERNAME}"
+      password_hash: "${INGEST_PASSWORD_HASH}"
+      algorithm: "${INGEST_PASSWORD_ALGORITHM:sha256}"
+      salt: "${INGEST_PASSWORD_SALT}"
+
+pipeline:
+  processors:
+    - resource: agent_usage_mapping
+
+output:
+  broker:
+    pattern: fan_out_sequential # Process sequentially to ensure Kafka write happens first
+    outputs:
+      - resource: lago_kafka_events_raw
+      - processors:
+          - mapping: 'root = ""' # Return empty string
+        sync_response: {} # Immediately respond to HTTP request
+
+processor_resources:
+  - label: agent_usage_mapping
+    mapping: |
+      root.organization_id = "${ORGANIZATION_ID}"
+      root.external_subscription_id = this.event.external_subscription_id
+      # Deterministic on the producer side (tenant + subsystem + hour bucket).
+      # A fresh id on retry double-bills — the producer owns this, never here.
+      root.transaction_id = this.event.transaction_id
+      # Billable-metric code, e.g. agent_tokens (sum) or agent_tool_calls (count).
+      root.code = this.event.code
+      root.timestamp = this.event.timestamp
+      # {value: <tokens>|1} — must match the billable metric's aggregation field.
+      root.properties = this.event.properties
+      root.ingested_at = timestamp_unix()
+
+output_resources:
+  - label: lago_kafka_events_raw
+    kafka_franz:
+      seed_brokers: ["${KAFKA_BROKERS}"]
+      topic: "${KAFKA_TOPIC}"
+      key: '${! json("organization_id") }-${! json("external_subscription_id") }'
+      tls:
+        enabled: ${KAFKA_TLS:false}
+      sasl:
+        - mechanism: SCRAM-SHA-512
+          username: "${KAFKA_USER}"
+          password: "${KAFKA_PASSWORD}"
+      batching:
+        count: ${KAFKA_BATCH_COUNT:100}
+        byte_size: ${KAFKA_BATCH_BYTE_SIZE:1000000} # 1MB default
+        period: ${KAFKA_BATCH_PERIOD:1s}
+
+metrics:
+  prometheus: {}

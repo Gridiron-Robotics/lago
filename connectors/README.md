@@ -96,3 +96,34 @@ the plaintext — e.g. `echo -n "$PASS$SALT" | sha256sum` for `sha256`, or a
 |KAFKA_BATCH_BYTE_SIZE|Maximum size in bytes for batching, default: 1000000 (1MB)|No|
 |KAFKA_BATCH_PERIOD|Time period for batching, default: 1s|No|
 
+## Agent-usage ingest (`/agent-usage`)
+
+Workstream C: the agent plane's metering feed. `agent_usage.yml` is a second HTTP
+ingestor, identical in shape to the `/events` one above but on the `/agent-usage`
+path, dedicated to billing the AI-agent estate. The langgraph cost governor
+(`langgraph-agents`) emits per-tenant token and tool-call counts and this pipeline
+turns them into Lago usage events. It shares the `INGEST_*` credentials and the
+`ORGANIZATION_ID` / `KAFKA_*` env with `http.yml` (same trusted ingest boundary,
+same fail-closed Basic auth, same server-side org stamp), so no new environment
+variables are introduced.
+
+**Lago-side setup (do this first).** Nothing meters until the billable metrics the
+producer names exist on the organisation. Create at least:
+
+|Billable metric `code`|Aggregation|`properties` field|
+|---|---|---|
+|`agent_tokens`|`sum_agg`|`value` (tokens for the turn/bucket)|
+|`agent_tool_calls`|`count_agg`|— (one event per tool call, or `value` per bucket)|
+
+**Idempotency (the rule this feed lives or dies by).** `transaction_id` is passed
+through verbatim and must be **deterministic on the producer side** — derive it
+from stable inputs (e.g. `tenant + subsystem + hourly bucket`), never from a fresh
+UUID per delivery. Lago deduplicates on it, so replaying the same id is safe; a
+retry that mints a *new* id silently double-bills the customer. Recommended v1
+grain is the hourly rollup, which matches the governor's existing hourly bucketing
+and yields the deterministic id for free.
+
+The producer side (the cost-governor sink that POSTs here) lives in the
+`langgraph-agents` repo and ships in that repo's PR — see its `cost_governor.py`
+`governed_record()` fan-out. This repo owns only the ingest pipeline.
+

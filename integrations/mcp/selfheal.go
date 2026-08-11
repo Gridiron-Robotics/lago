@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -26,12 +27,30 @@ import (
 //     fired from the handler path explicitly — otherwise the entire billing tool
 //     surface can be failing every call and the alert sees an empty result set.
 //
-// Deliberately stdlib-only, matching the rest of this package: no OTel SDK, no
-// CGO, so `go test ./...` and the MCP gate still run anywhere. Records go to
-// stderr as one JSON line each, which is what the estate log shipper reads.
+// Records go to stderr as one JSON line each (the write-ahead copy), AND, when
+// OTLP is configured, ship to OpenObserve over OTLP/HTTP via observability.go so
+// an alert can actually fire. The stderr line is written first and the OTLP send
+// is best-effort, so a collector outage can never lose or block a record.
 
 // selfHealService is the OpenObserve stream / incident module for this surface.
 const selfHealService = "lago"
+
+// emitter is the process-wide OTLP shipper attached to reporters built with
+// NewReporter. It defaults to a no-op and is replaced by InitSelfHeal(...) once
+// the OTLP env is read at startup. A NewReporter constructed before InitSelfHeal
+// (e.g. in tests) simply gets the no-op and stays stderr-only.
+var emitter Emitter = NopEmitter()
+
+// InitSelfHeal builds the OTLP shipper from the OTEL_* environment and installs
+// it as the process-wide emitter. Call it once at startup, before HTTPHandler
+// builds its reporter. Returns a shutdown hook (nil when the rail is disabled)
+// that flushes pending records; defer it so a clean exit does not drop the last
+// batch.
+func InitSelfHeal(ctx context.Context) func(context.Context) error {
+	e, shutdown := newEmitter(ctx, emitterOptions{})
+	emitter = e
+	return shutdown
+}
 
 // Reporter emits structured records on the self-heal rail.
 type Reporter struct {
@@ -39,14 +58,16 @@ type Reporter struct {
 	out     io.Writer
 	service string
 	now     func() time.Time
+	emitter Emitter
 }
 
-// NewReporter builds a reporter writing to w (nil = os.Stderr).
+// NewReporter builds a reporter writing to w (nil = os.Stderr), shipping level=
+// error records through the process-wide OTLP emitter installed by InitSelfHeal.
 func NewReporter(w io.Writer) *Reporter {
 	if w == nil {
 		w = os.Stderr
 	}
-	return &Reporter{out: w, service: selfHealService, now: time.Now}
+	return &Reporter{out: w, service: selfHealService, now: time.Now, emitter: emitter}
 }
 
 func (r *Reporter) emit(level, message string, fields map[string]any) map[string]any {
@@ -70,8 +91,16 @@ func (r *Reporter) emit(level, message string, fields map[string]any) map[string
 			level, r.service, strings.ReplaceAll(err.Error(), `"`, "'")))
 	}
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	_, _ = r.out.Write(append(line, '\n'))
+	r.mu.Unlock()
+
+	// Ship only level=error to OpenObserve: that is the field the estate alert
+	// matches on, and shipping warn/info would drown the rail. Best-effort and
+	// after the stderr write, so the JSON line stays the write-ahead copy and a
+	// collector outage never loses or blocks a record.
+	if level == "error" && r.emitter != nil {
+		r.emitter.Error(context.Background(), message, fields)
+	}
 	return rec
 }
 

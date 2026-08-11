@@ -17,6 +17,28 @@ See `../docs` in `erp_django_middleware` (`AUTH_ARCHITECTURE.md`,
 `MODULE_SSO_MATRIX.md`) for the estate-wide model. In the SSO matrix Lago is the
 `billing.` host, mechanism **JWT**.
 
+## Status (2026-08) — deploy plane wired; fork app-code NOT started
+
+This is a live tracking header so the recipe below does not read as silently
+under way when it is not.
+
+- **Deploy plane (this repo): DONE.** The strict gate, realm coordinates, and
+  `LAGO_DISABLE_SIGNUP` are threaded through compose + Kamal, default OFF (see
+  "What is already wired" below). Realm is `erp`; hosts are
+  `keycloak.gridironrobotics.com/realms/erp` and `dashboard.gridironrobotics.com`
+  throughout — no stale `gridiron-realm`/`app.` reference remains to repoint.
+- **Fork app-code (`getlago/lago-api`, `getlago/lago-front`): NOT STARTED.**
+  No fork repo exists yet and nothing is merged. It is **blocked on a decision
+  that cannot be taken from this repo**: who owns/hosts the fork, which upstream
+  tag it forks from, and who rebases it on each Lago release (the two compose
+  files here pin different upstream versions — `v1.27.1` prod vs `v1.48.1` root —
+  which is exactly the drift the fork owner must resolve). That JWT-verification
+  work is tracked in the estate cross-repo backlog against `getlago/lago-api`
+  and `getlago/lago-front`; the file-pointed recipe below is the spec for it.
+- **Consequence:** with `LAGO_ERP_SSO_STRICT` unset/false (the shipped default)
+  behaviour is byte-for-byte upstream Lago, so nothing here is blocking a
+  deploy. Strict mode does nothing enforceable until the fork lands.
+
 ---
 
 ## What is already wired in this repo (deploy plane)

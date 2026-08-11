@@ -101,14 +101,22 @@ Per the ratchet rule, each integration ships with its own gate the day it's buil
         route** (the 503 names the variable); `LAGO_MCP_ALLOW_INSECURE=true` is the
         explicit dev-only escape hatch, and a configured token beats it. `HEAD /`
         stays open for liveness and leaks nothing.
-  - [x] _OpenObserve self-heal wired._ Failures emit `level=error` records with
-        `service=lago` (the stream **is** the incident module). Register with
-        `langgraph-agents/deploy/observability/apply-alerts.sh lago`. The rail fires
-        from the **handler path**, because Contract A turns every failure into
-        structured non-2xx JSON — there is no 5xx or panic for an alert to key off,
-        so a crash-based rail would report nothing while the whole surface failed.
-        Caller mistakes log at `warn`, not `error`, so malformed tool calls don't
-        bury real faults; each record carries `destructive` for triage.
+  - [x] _OpenObserve self-heal wired AND shipped._ Failures emit `level=error`
+        records with `service.name=lago` (the incident module) to **two**
+        destinations: stderr (write-ahead JSON line) and, when the OTEL_* env is
+        set, OpenObserve over OTLP/HTTP via `integrations/mcp/observability.go`
+        (the same OpenTelemetry-log shipper `ach-payments`/`bigcapital-enterprise`
+        use; a unit test with an injected exporter pins `service.name=lago` and
+        that env-unset stays stderr-only). Register the estate rule with
+        `apply-alerts.sh default` — **not** `apply-alerts.sh lago`: behind a shared
+        collector all modules land in one `default` stream and module identity
+        comes from `service_name`, so a per-module `lago` rule would watch nothing.
+        The rail fires from the **handler path**, because Contract A turns every
+        failure into structured non-2xx JSON — there is no 5xx or panic for an
+        alert to key off, so a crash-based rail would report nothing while the
+        whole surface failed. Caller mistakes log at `warn`, not `error`, so
+        malformed tool calls don't bury real faults; each record carries
+        `destructive` for triage.
   - [x] _The gate enforces the invariant structurally_, not just by test: `make mcp`
         fails if a non-GET request is constructed outside `lagowriter.go`, or if
         `allowedWrites` stops being an explicit enumeration. Verified by injecting
@@ -126,6 +134,18 @@ Per the ratchet rule, each integration ships with its own gate the day it's buil
         the middleware's in-process tool table would invert the architecture. No
         middleware change is owed. `LAGO_MCP_TOKEN` is a deploy-time secret and
         stays out of git by design (see "Never put secrets in git").
+  - [x] _Containerized + on the estate network._ `integrations/mcp/Dockerfile`
+        (two-stage, CGO-free, non-root) and a `lago-mcp` service in
+        `deploy/docker-compose.production.yml` (`expose: 8037`, `LAGO_MCP_TOKEN`,
+        `LAGO_API_URL`/`LAGO_API_KEY`), joined to `erp_shared_network` — the same
+        two-network sidecar shape bigcapital ships. Registration downstream is not
+        enough on its own: `langgraph-agents/docker-compose.real.yml` dials
+        `http://lago-mcp:8037`, so without this service that name resolves to
+        nothing and every billing tool call fails at connect. Structurally covered
+        by the `pins` + `compose` gates. Live verification (a `curl -I` from a
+        container on `erp_shared_network` returning 200) is a deploy step; the
+        consumer side still needs its `GATEWAY_TOKENS` `lago` entry set to the same
+        token (a `langgraph-agents` change, tracked cross-repo).
   - [x] IGNORED (charter) — _the Rails billing engine (`api/`, `front/`) is an empty
         submodule here._ That is this repo's **scope**, not a gap in it: it is the
         Lago **deploy** repo (Kamal + Helm + compose + connectors + the Go
@@ -139,3 +159,11 @@ Per the ratchet rule, each integration ships with its own gate the day it's buil
 ### Ratchet log (add a line every time a bug slips through)
 
 - _2026-… — example: "smoke test added after an all-404 ASGI bug shipped green."_
+- _2026-08 — the MCP block shipped fully checked over a surface that had no
+  container and no log shipper: registration downstream was done but no
+  `Dockerfile`/compose service existed, and `level=error` records went to stderr
+  with nothing shipping them (and the registration command named a per-module
+  stream that cannot exist behind a shared collector). Closed by shipping
+  `integrations/mcp/Dockerfile` + the `lago-mcp` compose service and the
+  `observability.go` OTLP shipper, and corrected `apply-alerts.sh lago` →
+  `default`. Both are now their own checked boxes so the gap stays visible._
