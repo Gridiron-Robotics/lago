@@ -106,7 +106,12 @@ services:
     volumes:
       - lago_postgres_data:/data/postgres
     ports:
-      - ${POSTGRES_PORT:-5432}:${POSTGRES_PORT:-5432}
+      # Host side only. POSTGRES_PORT is lago's WHOLE-STACK port variable —
+      # PGPORT, DATABASE_URL and the healthcheck all read it — so retargeting
+      # it to deconflict a host binding would move the port inside the
+      # container too. That works, because lago is self-consistent, but it is
+      # far more blast radius than a host collision warrants.
+      - ${LAGO_HOST_PORT_5432:-${POSTGRES_PORT:-5432}}:${POSTGRES_PORT:-5432}
 
   redis:
     <<: *redis-image
@@ -121,7 +126,9 @@ services:
     volumes:
       - lago_redis_data:/data
     ports:
-      - ${REDIS_PORT:-6379}:${REDIS_PORT:-6379}
+      # Host side only — see the postgres binding above. REDIS_PORT is read by
+      # REDIS_URL and by the redis-cli healthcheck.
+      - ${LAGO_HOST_PORT_6379:-${REDIS_PORT:-6379}}:${REDIS_PORT:-6379}
 
   migrate:
     <<: *backend-image
@@ -159,7 +166,7 @@ services:
     volumes:
       - lago_storage_data:/app/storage
     ports:
-      - ${API_PORT:-3000}:3000
+      - "${LAGO_HOST_PORT_3000:-${API_PORT:-3000}}:3000"
 
   front:
     <<: *frontend-image
@@ -174,7 +181,7 @@ services:
     environment:
       <<: [*frontend-env, *lago-api-url, *lago-front-url]
     ports:
-      - ${FRONT_PORT:-80}:80
+      - "${LAGO_HOST_PORT_80:-${FRONT_PORT:-80}}:80"
     #  - 443:443
     # Using SSL with Let's Encrypt
     # volumes:
