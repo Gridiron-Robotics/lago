@@ -5,7 +5,7 @@
 # turns them into Lago usage events. It is a SEPARATE endpoint from /events so the
 # two feeds can be rate-limited, credentialled and scaled independently.
 #
-# Two invariants this file exists to hold, both learned the hard way:
+# Three invariants this file exists to hold, all learned the hard way:
 #
 #  1. Org is stamped server-side from ${ORGANIZATION_ID}, never read from the
 #     request body — a caller must not be able to bill another organisation
@@ -16,6 +16,14 @@
 #     on it, so replaying the same id is safe; minting a fresh id on a retry
 #     silently double-bills the customer. The producer owns that key — this
 #     pipeline never generates one.
+#
+#  3. The ingest endpoint is AUTHENTICATED and fail-closed. The auth check runs
+#     in-pipeline (the redpanda-connect `http_server` input has no native auth
+#     field — an earlier `basic_auth:` block here was silently invalid and the
+#     pipeline refused to boot under the pinned connect image). See the auth
+#     processor below: it compares the presented Bearer token against
+#     INGEST_TOKEN and, on mismatch, returns 401 and DROPS the event before it
+#     can reach Kafka. With INGEST_TOKEN unset it rejects everything (fail-closed).
 input:
   label: http_agent_usage_ingestor
   http_server:
@@ -23,32 +31,57 @@ input:
     path: /agent-usage
     allowed_verbs:
       - POST
-    # Authenticate the ingest endpoint. Without this, any peer that can reach
-    # :3000 could POST agent-usage events. Fail closed: enabled by default — set
-    # the credentials before exposing it (INGEST_PASSWORD_HASH is a hash, not the
-    # plaintext; see connectors/README.md). Shares the INGEST_* credentials with
-    # http.yml — it is the same trusted ingest boundary.
-    basic_auth:
-      enabled: ${INGEST_BASIC_AUTH_ENABLED:true}
-      username: "${INGEST_USERNAME}"
-      password_hash: "${INGEST_PASSWORD_HASH}"
-      algorithm: "${INGEST_PASSWORD_ALGORITHM:sha256}"
-      salt: "${INGEST_PASSWORD_SALT}"
+    # The HTTP status is driven by the in-pipeline auth check (meta http_status):
+    # 401 for an unauthenticated/forged event, 200 for an accepted one.
+    sync_response:
+      status: '${! meta("http_status").or("200") }'
 
 pipeline:
   processors:
+    # Authenticate FIRST, before the billing mapping. The http_server input
+    # exposes request headers as metadata, so we verify the bearer here. This is
+    # the real auth boundary — without it any peer that can reach :3000 could POST
+    # agent-usage events and inflate a customer's bill.
+    - resource: ingest_bearer_auth
     - resource: agent_usage_mapping
 
 output:
-  broker:
-    pattern: fan_out_sequential # Process sequentially to ensure Kafka write happens first
-    outputs:
-      - resource: lago_kafka_events_raw
-      - processors:
-          - mapping: 'root = ""' # Return empty string
-        sync_response: {} # Immediately respond to HTTP request
+  # Route on the auth verdict. An unauthenticated event is answered 401 and is
+  # NEVER written to Kafka; only an accepted event fans out to the events topic.
+  switch:
+    cases:
+      - check: 'meta("http_status") != "200"'
+        output:
+          processors:
+            - mapping: 'root = ""' # empty 401 body
+          sync_response: {}
+      - output:
+          broker:
+            pattern: fan_out_sequential # Process sequentially to ensure Kafka write happens first
+            outputs:
+              - resource: lago_kafka_events_raw
+              - processors:
+                  - mapping: 'root = ""' # Return empty string
+                sync_response: {} # Immediately respond to HTTP request
 
 processor_resources:
+  # Fail-closed bearer auth for the ingest boundary. Shares INGEST_* with
+  # http.yml — the same trusted ingest boundary. Sets meta http_status, which the
+  # output switch and the input sync_response both read.
+  #   * INGEST_TOKEN        — the shared bearer the producer presents. Unset =>
+  #                           every request is rejected (fail-closed).
+  #   * INGEST_AUTH_ENABLED — "false" disables auth for trusted-network dev only;
+  #                           anything else (default) enforces it.
+  - label: ingest_bearer_auth
+    mapping: |
+      let auth_enabled = "${INGEST_AUTH_ENABLED:true}"
+      let configured   = "${INGEST_TOKEN:}"
+      let presented    = meta("Authorization").or("")
+      let ok = if $auth_enabled != "true" { true } else {
+        $configured.length() > 0 && $presented == ("Bearer " + $configured)
+      }
+      meta http_status = if $ok { "200" } else { "401" }
+      root = this
   - label: agent_usage_mapping
     mapping: |
       root.organization_id = "${ORGANIZATION_ID}"
@@ -61,6 +94,13 @@ processor_resources:
       root.timestamp = this.event.timestamp
       # {value: <tokens>|1} — must match the billable metric's aggregation field.
       root.properties = this.event.properties
+      # Per-actor attribution (§4 per-user metering). Carried VERBATIM from the
+      # producer's audit record (actor on every routing_decision + tool_invoke).
+      # The tenant boundary stays server-side (organization_id above), so actor is
+      # a sub-dimension WITHIN the tenant, never a way to select another tenant.
+      # Omitted entirely when the producer sends no actor, so it is additive and
+      # non-breaking for existing producers.
+      root.actor = this.event.actor.or(deleted())
       root.ingested_at = timestamp_unix()
 
 output_resources:
