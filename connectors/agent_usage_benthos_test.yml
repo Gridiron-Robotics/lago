@@ -1,0 +1,74 @@
+# Behavioral unit test for the agent-usage ingest AUTH BOUNDARY.
+#
+# Why this exists: connectors-gate.sh lints the pipeline (proves it PARSES).
+# It does NOT prove the auth logic authenticates — a full bypass mutation
+# (`let ok = true` in ingest_bearer_auth) lints perfectly clean and would
+# forward a forged/unauthenticated event straight to Kafka, inflating a
+# customer's bill. Parse-clean is not auth-enforced; that gap is exactly the
+# tautological-gate class this estate has been burned by.
+#
+# These cases run the REAL ingest_bearer_auth processor (via the pipeline) and
+# assert on the http_status verdict it stamps. redpanda-connect's output switch
+# routes on that verdict, so http_status is the single source of truth for
+# "did this event reach Kafka". Run by connectors-gate.sh when the real linter
+# is present:  redpanda-connect test connectors/agent_usage_test.yaml
+#
+# The load-bearing assertion is negative: wrong-token and no-token MUST be 401,
+# and an unset INGEST_TOKEN MUST reject everything (fail-closed). A bypass
+# regression flips one of these to 200 and fails the gate.
+
+tests:
+  - name: correct bearer is accepted (200 -> event reaches Kafka)
+    target_processors: /pipeline/processors
+    environment:
+      INGEST_TOKEN: s3cret-ingest-token
+      INGEST_AUTH_ENABLED: "true"
+      ORGANIZATION_ID: org_test
+    input_batch:
+      - content: |
+          {"event":{"external_subscription_id":"sub_1","transaction_id":"t_1","code":"agent_tokens","timestamp":1786954681,"properties":{"value":42},"actor":"user:pete@gridironrobotics.com"}}
+        metadata:
+          Authorization: Bearer s3cret-ingest-token
+    output_batches:
+      - - metadata_equals:
+            http_status: "200"
+
+  - name: wrong bearer is rejected (401 -> event dropped, never billed)
+    target_processors: /pipeline/processors
+    environment:
+      INGEST_TOKEN: s3cret-ingest-token
+      INGEST_AUTH_ENABLED: "true"
+      ORGANIZATION_ID: org_test
+    input_batch:
+      - content: '{"event":{"code":"agent_tokens","properties":{"value":999999}}}'
+        metadata:
+          Authorization: Bearer attacker-guessed-token
+    output_batches:
+      - - metadata_equals:
+            http_status: "401"
+
+  - name: missing bearer is rejected (401)
+    target_processors: /pipeline/processors
+    environment:
+      INGEST_TOKEN: s3cret-ingest-token
+      INGEST_AUTH_ENABLED: "true"
+      ORGANIZATION_ID: org_test
+    input_batch:
+      - content: '{"event":{"code":"agent_tokens","properties":{"value":1}}}'
+    output_batches:
+      - - metadata_equals:
+            http_status: "401"
+
+  - name: unset INGEST_TOKEN rejects everything (fail-closed)
+    target_processors: /pipeline/processors
+    environment:
+      INGEST_TOKEN: ""
+      INGEST_AUTH_ENABLED: "true"
+      ORGANIZATION_ID: org_test
+    input_batch:
+      - content: '{"event":{"code":"agent_tokens","properties":{"value":1}}}'
+        metadata:
+          Authorization: Bearer anything
+    output_batches:
+      - - metadata_equals:
+            http_status: "401"

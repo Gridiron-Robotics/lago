@@ -26,7 +26,14 @@ if [[ ! -d "${DIR}" ]]; then
 fi
 
 shopt -s nullglob
-configs=("${DIR}"/*.yml "${DIR}"/*.yaml)
+configs=()
+for f in "${DIR}"/*.yml "${DIR}"/*.yaml; do
+  # A *_benthos_test.yml is a unit-test definition for its sibling config, not a
+  # pipeline itself — it has no input/output and must not be lint-checked as one
+  # (it is executed via `<linter> test` in step 3b instead).
+  [[ "${f}" == *_benthos_test.yml || "${f}" == *_benthos_test.yaml ]] && continue
+  configs+=("${f}")
+done
 shopt -u nullglob
 
 if (( ${#configs[@]} == 0 )); then
@@ -77,6 +84,24 @@ for cfg in "${configs[@]}"; do
       note "$(tail -n 10 .lint.log)"
     fi
     rm -f .lint.log
+
+    # 3b) behavioral unit tests — lint proves the pipeline PARSES, it does NOT
+    # prove the auth logic authenticates. A full-bypass mutation of the
+    # ingest_bearer_auth processor (`let ok = true`) lints perfectly clean and
+    # would forward a forged event to Kafka. A sibling <cfg>_benthos_test.yml
+    # asserts the http_status verdict, so an auth regression fails HERE. Only
+    # redpanda-connect/benthos can run these; skip honestly when the docker
+    # linter is the only one available (its `test` needs the same binary).
+    test_file="${cfg%.*}_benthos_test.yml"
+    if [[ -f "${test_file}" ]]; then
+      if "${LINTER}" test "${cfg}" >.test.log 2>&1; then
+        pass "${name}: ${LINTER} unit tests (auth behavior enforced)"
+      else
+        fail "${name}: ${LINTER} unit tests failed"
+        note "$(tail -n 12 .test.log)"
+      fi
+      rm -f .test.log
+    fi
   elif [[ "${CONNECTORS_DOCKER_LINT:-0}" == "1" ]] && have docker; then
     # The configs interpolate ${ENV_VARS}; connect lint flags any without a
     # default as "required". Provide placeholders for those so lint validates the
