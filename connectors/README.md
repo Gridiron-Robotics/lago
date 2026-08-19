@@ -142,6 +142,12 @@ grain is the hourly rollup, which matches the governor's existing hourly bucketi
 and yields the deterministic id for free.
 
 The producer side (the cost-governor sink that POSTs here) lives in the
-`langgraph-agents` repo and ships in that repo's PR — see its `cost_governor.py`
-`governed_record()` fan-out. This repo owns only the ingest pipeline.
+`langgraph-agents` repo and is now **shipped**: `agentic_core/lago_usage.py`,
+fanned out from `cost_governor.py::governed_record()`. It rolls usage up hourly
+per `(tenant, subsystem, actor, code)`, derives `transaction_id` as a pure
+function of those five inputs (so a retry — even from another process — replays
+the same id), sends **no** `organization_id` (this pipeline stamps it), and
+POSTs on a background daemon thread behind a bounded queue so an ingest outage
+can never fail the agent call being metered. It is off until
+`LAGO_USAGE_ENDPOINT` is set. This repo owns only the ingest pipeline.
 

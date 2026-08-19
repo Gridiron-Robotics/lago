@@ -20,7 +20,10 @@ and a gate for it so it can never escape again.
 - [ ] **Compose / Docker / shell** — all compose files validate; `hadolint`
       error-level clean; `shellcheck` error-level clean.
 - [ ] **Deploy** — Kamal is exactly **2.11.0**; `kamal config` renders;
-      `helm lint` and `helm template` succeed.
+      `helm lint` and `helm template` succeed; **`Gemfile.lock` is present,
+      tracked, un-drifted and resolves kamal 2.11.0**, `.ruby-version` pins the
+      Ruby CI installs, and the gate runs `BUNDLE_FROZEN=true` so it cannot
+      repair the lockfile it is judging.
 
 ## Tooling installed so nothing SKIPs
 
@@ -58,6 +61,16 @@ Per the ratchet rule, each integration ships with its own gate the day it's buil
 
 - [ ] **Middleware → Lago (inbound usage):** a new `connectors/<name>.yml` (Redpanda
       Connect). Auto-covered by `connectors-gate.sh`; pinning gate covers its deps.
+- [x] **Agent-plane metering (`/agent-usage`) — BOTH HALVES NOW EXIST.** The
+      ingest pipeline is `connectors/agent_usage.yml` (this repo). The producer
+      shipped in `langgraph-agents` as `agentic_core/lago_usage.py`, hooked into
+      `cost_governor.py::governed_record()`: hourly rollup per
+      (tenant, subsystem, actor, code) with a deterministic `transaction_id`,
+      no client-supplied `organization_id`, and a fire-and-forget POST on a
+      daemon thread so an ingest outage cannot fail the metered operation.
+      Lago-side setup (create the `agent_tokens` / `agent_tool_calls` billable
+      metrics on the organisation) is still a deploy step — see
+      `connectors/README.md`.
 - [x] **Lago → accounting (outbound) — BUILT (gate-first, all four ERPs).**
       The exactly-once contract is enforced in `integrations/accounting/`
       (`make accounting`): "given usage event X, the **selected** accounting target
@@ -167,3 +180,13 @@ Per the ratchet rule, each integration ships with its own gate the day it's buil
   `integrations/mcp/Dockerfile` + the `lago-mcp` compose service and the
   `observability.go` OTLP shipper, and corrected `apply-alerts.sh lago` →
   `default`. Both are now their own checked boxes so the gap stays visible._
+- _2026-08 — the deploy gate asserted kamal 2.11.0 from `Gemfile` and
+  `.kamal/version` but never looked at `Gemfile.lock`, which is what
+  `bundle exec kamal` actually runs. Worse, when the lockfile check was first
+  added it could not fail: the gate's own `bundle exec` re-resolves and
+  REWRITES a missing/drifted `Gemfile.lock` before the checks read it, so
+  deleting the lockfile or drifting it to kamal 1.9.0 both stayed GREEN. Closed
+  by `export BUNDLE_FROZEN=true` (a gate must never mutate the artifact it
+  judges) plus running the static lockfile checks before anything invokes
+  bundler. Caught only by mutation-testing the new checks — a check that has
+  never been observed to go RED is not a check._
