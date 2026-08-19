@@ -11,16 +11,21 @@ const HTTP_RUBY string = "http_ruby"
 const TARGET_WALLET_CODE string = "target_wallet_code"
 
 type Event struct {
-	OrganizationID          string           `json:"organization_id"`
-	ExternalSubscriptionID  string           `json:"external_subscription_id"`
-	TransactionID           string           `json:"transaction_id"`
-	Code                    string           `json:"code"`
-	Properties              map[string]any   `json:"properties"`
-	PreciseTotalAmountCents string           `json:"precise_total_amount_cents"`
-	Source                  string           `json:"source,omitempty"`
-	Timestamp               any              `json:"timestamp"`
-	SourceMetadata          *SourceMetadata  `json:"source_metadata"`
-	IngestedAt              utils.CustomTime `json:"ingested_at"`
+	OrganizationID          string         `json:"organization_id"`
+	ExternalSubscriptionID  string         `json:"external_subscription_id"`
+	TransactionID           string         `json:"transaction_id"`
+	Code                    string         `json:"code"`
+	Properties              map[string]any `json:"properties"`
+	PreciseTotalAmountCents string         `json:"precise_total_amount_cents"`
+	Source                  string         `json:"source,omitempty"`
+	// Actor is the per-user attribution carried from the agent-plane audit record
+	// (actor on every routing_decision + tool_invoke) — see the /agent-usage
+	// ingest in connectors/agent_usage.yml. Additive and optional: legacy
+	// producers omit it, so it stays "" and nothing changes for existing events.
+	Actor          string           `json:"actor,omitempty"`
+	Timestamp      any              `json:"timestamp"`
+	SourceMetadata *SourceMetadata  `json:"source_metadata"`
+	IngestedAt     utils.CustomTime `json:"ingested_at"`
 }
 
 type SourceMetadata struct {
@@ -38,26 +43,29 @@ type EnrichedEvent struct {
 	Subscription   *Subscription   `json:"-"`
 	FlatFilter     *FlatFilter     `json:"-"`
 
-	OrganizationID          string            `json:"organization_id"`
-	ExternalSubscriptionID  string            `json:"external_subscription_id"`
-	SubscriptionID          string            `json:"subscription_id"`
-	PlanID                  string            `json:"plan_id"`
-	TransactionID           string            `json:"transaction_id"`
-	Code                    string            `json:"code"`
-	AggregationType         string            `json:"aggregation_type"`
-	Properties              map[string]any    `json:"properties"`
-	PreciseTotalAmountCents string            `json:"precise_total_amount_cents"`
-	Source                  string            `json:"source,omitempty"`
-	Value                   *string           `json:"value"`
-	Timestamp               float64           `json:"timestamp"`
-	TimestampStr            string            `json:"-"`
-	Time                    time.Time         `json:"-"`
-	ChargeID                *string           `json:"charge_id"`
-	ChargeUpdatedAt         *time.Time        `json:"charge_updated_at"`
-	ChargeFilterID          *string           `json:"charge_filter_id"`
-	ChargeFilterUpdatedAt   *time.Time        `json:"charge_filter_updated_at"`
-	GroupedBy               map[string]string `json:"grouped_by"`
-	TargetWalletCode        *string           `json:"target_wallet_code"`
+	OrganizationID          string         `json:"organization_id"`
+	ExternalSubscriptionID  string         `json:"external_subscription_id"`
+	SubscriptionID          string         `json:"subscription_id"`
+	PlanID                  string         `json:"plan_id"`
+	TransactionID           string         `json:"transaction_id"`
+	Code                    string         `json:"code"`
+	AggregationType         string         `json:"aggregation_type"`
+	Properties              map[string]any `json:"properties"`
+	PreciseTotalAmountCents string         `json:"precise_total_amount_cents"`
+	Source                  string         `json:"source,omitempty"`
+	// Actor is threaded through enrichment so per-user attribution survives to the
+	// billing sink. Carried verbatim from the initial event; "" when absent.
+	Actor                 string            `json:"actor,omitempty"`
+	Value                 *string           `json:"value"`
+	Timestamp             float64           `json:"timestamp"`
+	TimestampStr          string            `json:"-"`
+	Time                  time.Time         `json:"-"`
+	ChargeID              *string           `json:"charge_id"`
+	ChargeUpdatedAt       *time.Time        `json:"charge_updated_at"`
+	ChargeFilterID        *string           `json:"charge_filter_id"`
+	ChargeFilterUpdatedAt *time.Time        `json:"charge_filter_updated_at"`
+	GroupedBy             map[string]string `json:"grouped_by"`
+	TargetWalletCode      *string           `json:"target_wallet_code"`
 }
 
 type FailedEvent struct {
@@ -78,6 +86,7 @@ func (ev *Event) ToEnrichedEvent() utils.Result[*EnrichedEvent] {
 		Properties:              ev.Properties,
 		PreciseTotalAmountCents: ev.PreciseTotalAmountCents,
 		Source:                  ev.Source,
+		Actor:                   ev.Actor,
 		GroupedBy:               make(map[string]string),
 	}
 

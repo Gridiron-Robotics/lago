@@ -6,8 +6,10 @@ client (Claude Desktop, Claude Code, the langgraph brain) at it and an agent can
 both answer billing questions *and* drive the metered-billing lifecycle — with
 every mutation enumerated, marked destructive, and idempotency-keyed.
 
-Run the gate: `make mcp`. Pure Go, stdlib only (no deps, no CGO), so it builds and
-tests anywhere.
+Run the gate: `make mcp`. Pure Go, no CGO, so it builds and tests anywhere. The
+only dependency is the OpenTelemetry log SDK, used solely to ship `level=error`
+self-heal records to OpenObserve (see [OpenObserve self-heal](#openobserve-self-heal));
+everything on the tool path is stdlib.
 
 ## Scope: this module bills subscriptions and usage, not orders
 
@@ -141,17 +143,72 @@ required argument, 502 upstream Lago failure, 503 unconfigured.
 An **unknown tool defaults to destructive** — a registry lookup that misses must
 not report a mutation as harmless.
 
+### Container
+
+The brain reaches this surface as `lago-mcp:8037` over the estate network, so it
+ships as a container in the production stack:
+
+```bash
+# The estate network is created by the master compose; for a standalone
+# bring-up it has to exist first, or compose fails for the WHOLE file.
+docker network create erp_shared_network 2>/dev/null || true
+
+docker compose -f deploy/docker-compose.production.yml up -d lago-mcp
+```
+
+Set `LAGO_MCP_TOKEN` and `LAGO_MCP_LAGO_API_KEY` in `deploy/.env.production`
+(see `deploy/.env.production.example`). The service uses `expose:`, never
+`ports:` — it fronts a billing API key and must not be published to the host.
+
+Two startup facts the image encodes, both of which otherwise produce a container
+that looks healthy while serving nothing:
+
+- `LAGO_MCP_HTTP_ADDR` must be non-empty (the image defaults it to `:8037`).
+  Empty means stdio-only, which binds no port and, with no stdin in a container,
+  returns immediately on EOF.
+- It is an env var rather than an `ENTRYPOINT` flag because `-http` is a *string*
+  flag: a bare `-http` is not "use the default", it is `flag needs an argument:
+  -http` and exit 2.
+
+The healthcheck probes `GET /`, the only route that answers 200 in every auth
+posture — including the fail-closed one the sidecar correctly sits in until
+`LAGO_MCP_TOKEN` is issued, where `/tools` answers 503 by design.
+
 ## OpenObserve self-heal
 
 Failures on this surface emit one JSON line per record with `level=error`, which
-is the field the estate alert rule matches; `service` is `lago`, which is both the
-OpenObserve stream and the incident `module`.
+is the field the estate alert rule matches; `service.name` is `lago`, which is the
+incident `module` the langgraph loop keys on.
 
-Register the alert once per stream:
+Two destinations, in this order:
+
+1. **stderr** — one JSON line per record, always. The write-ahead copy.
+2. **OTLP/HTTP → OpenObserve** — `level=error` records are also shipped to the
+   estate collector by `observability.go` (the same OpenTelemetry-log shipper
+   `ach-payments` and `bigcapital-enterprise` use). Off unless the OTLP env is
+   set, so dev runs and tests stay stderr-only.
+
+Enable shipping by setting these on the `lago-mcp` service (empty defaults live in
+`deploy/.env.production.example`; the base64 header is a credential and belongs in
+the env file / secret store, never in a committed yaml):
+
+```
+OTEL_EXPORTER_OTLP_ENDPOINT=http://openobserve:5080/api/<org>/v1
+OTEL_EXPORTER_OTLP_HEADERS=Authorization=Basic <base64 email:password>
+OTEL_SERVICE_NAME=lago
+```
+
+Register the estate error rule once, against the collector's **actual** stream:
 
 ```bash
-langgraph-agents/deploy/observability/apply-alerts.sh lago
+langgraph-agents/deploy/observability/apply-alerts.sh default
 ```
+
+The argument is `default`, **not** `lago`: behind a shared OTLP collector every
+module's logs land in one stream named `default` (OpenObserve takes the stream
+name from a static request header), so a per-module `lago` rule would watch a
+stream that does not exist and never fire. Module identity comes from each row's
+`service_name`. See `apply-alerts.sh` and `openobserve/deploy/gridiron/DECISIONS.md §2`.
 
 **The trap this is built around:** Contract A converts every tool failure into a
 structured non-2xx JSON response. There is no unhandled panic and no 5xx for an
@@ -173,7 +230,8 @@ failed call could have moved money.
 | `server.go` | minimal MCP server: JSON-RPC over stdio (`initialize`/`tools/list`/`tools/call`/`ping`) + destructive lookup |
 | `http.go` | Contract A HTTP surface (`GET /tools`, `POST /invoke`, `HEAD /`) reusing the same tools |
 | `auth.go` | fail-closed boundary credential (constant-time compare, three modes) |
-| `selfheal.go` | OpenObserve rail: `level=error` records + caller-vs-operational classifier |
+| `selfheal.go` | OpenObserve rail: `level=error` records (stderr) + caller-vs-operational classifier |
+| `observability.go` | OTLP/HTTP shipper: sends the `level=error` records to OpenObserve (`service.name=lago`), no-op unless the OTEL_* env is set |
 | `lagoclient.go` | **GET-only** Lago REST client (the read chokepoint) |
 | `lagowriter.go` | **allow-listed** Lago write client (the write chokepoint) |
 | `tools.go` | the six read tool definitions + handlers |

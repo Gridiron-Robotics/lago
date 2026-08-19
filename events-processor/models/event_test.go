@@ -1,6 +1,7 @@
 package models
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -85,5 +86,65 @@ func TestNotAPIPostProcessed(t *testing.T) {
 
 		event.SourceMetadata.ApiPostProcess = false
 		assert.True(t, event.NotAPIPostProcessed())
+	})
+}
+
+func TestActorAttribution(t *testing.T) {
+	t.Run("actor from the ingest payload unmarshals onto Event", func(t *testing.T) {
+		// This is exactly what the /agent-usage pipeline writes to Kafka:
+		// a per-user actor stamped alongside the metered usage.
+		raw := `{
+			"organization_id": "org-1",
+			"external_subscription_id": "sub_id",
+			"transaction_id": "tenant-agent-2026081700",
+			"code": "agent_tokens",
+			"actor": "user:pete@gridironrobotics.com",
+			"properties": {"value": "512"},
+			"timestamp": 1741007009
+		}`
+
+		var event Event
+		err := json.Unmarshal([]byte(raw), &event)
+		assert.NoError(t, err)
+		assert.Equal(t, "user:pete@gridironrobotics.com", event.Actor)
+	})
+
+	t.Run("actor is threaded through enrichment", func(t *testing.T) {
+		event := Event{
+			OrganizationID:         "org-1",
+			ExternalSubscriptionID: "sub_id",
+			Code:                   "agent_tokens",
+			Actor:                  "user:pete@gridironrobotics.com",
+			Timestamp:              1741007009,
+		}
+
+		result := event.ToEnrichedEvent()
+		assert.True(t, result.Success())
+		assert.Equal(t, "user:pete@gridironrobotics.com", result.Value().Actor)
+	})
+
+	t.Run("actor is additive: legacy events without it stay empty and unaffected", func(t *testing.T) {
+		// No "actor" key at all — the pre-existing producer shape.
+		raw := `{
+			"organization_id": "org-1",
+			"external_subscription_id": "sub_id",
+			"code": "api_calls",
+			"timestamp": 1741007009
+		}`
+
+		var event Event
+		err := json.Unmarshal([]byte(raw), &event)
+		assert.NoError(t, err)
+		assert.Equal(t, "", event.Actor)
+
+		result := event.ToEnrichedEvent()
+		assert.True(t, result.Success())
+		assert.Equal(t, "", result.Value().Actor)
+
+		// omitempty: a legacy event round-trips with no "actor" field, so the
+		// change cannot alter an existing payload on the wire.
+		out, err := json.Marshal(event)
+		assert.NoError(t, err)
+		assert.NotContains(t, string(out), "actor")
 	})
 }

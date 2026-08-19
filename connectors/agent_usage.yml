@@ -1,0 +1,124 @@
+# Agent-plane usage ingest (workstream C).
+#
+# Same shape as http.yml, dedicated to metering the AGENT plane: the langgraph
+# cost governor emits tokens / tool-call counts per tenant and this pipeline
+# turns them into Lago usage events. It is a SEPARATE endpoint from /events so the
+# two feeds can be rate-limited, credentialled and scaled independently.
+#
+# Three invariants this file exists to hold, all learned the hard way:
+#
+#  1. Org is stamped server-side from ${ORGANIZATION_ID}, never read from the
+#     request body — a caller must not be able to bill another organisation
+#     (this is what commit 6b2c56f "derive org server-side (O7)" established).
+#
+#  2. transaction_id is passed through VERBATIM and must be deterministic on the
+#     producer side (e.g. tenant + subsystem + hourly bucket). Lago deduplicates
+#     on it, so replaying the same id is safe; minting a fresh id on a retry
+#     silently double-bills the customer. The producer owns that key — this
+#     pipeline never generates one.
+#
+#  3. The ingest endpoint is AUTHENTICATED and fail-closed. The auth check runs
+#     in-pipeline (the redpanda-connect `http_server` input has no native auth
+#     field — an earlier `basic_auth:` block here was silently invalid and the
+#     pipeline refused to boot under the pinned connect image). See the auth
+#     processor below: it compares the presented Bearer token against
+#     INGEST_TOKEN and, on mismatch, returns 401 and DROPS the event before it
+#     can reach Kafka. With INGEST_TOKEN unset it rejects everything (fail-closed).
+input:
+  label: http_agent_usage_ingestor
+  http_server:
+    address: "0.0.0.0:3000"
+    path: /agent-usage
+    allowed_verbs:
+      - POST
+    # The HTTP status is driven by the in-pipeline auth check (meta http_status):
+    # 401 for an unauthenticated/forged event, 200 for an accepted one.
+    sync_response:
+      status: '${! meta("http_status").or("200") }'
+
+pipeline:
+  processors:
+    # Authenticate FIRST, before the billing mapping. The http_server input
+    # exposes request headers as metadata, so we verify the bearer here. This is
+    # the real auth boundary — without it any peer that can reach :3000 could POST
+    # agent-usage events and inflate a customer's bill.
+    - resource: ingest_bearer_auth
+    - resource: agent_usage_mapping
+
+output:
+  # Route on the auth verdict. An unauthenticated event is answered 401 and is
+  # NEVER written to Kafka; only an accepted event fans out to the events topic.
+  switch:
+    cases:
+      - check: 'meta("http_status") != "200"'
+        output:
+          processors:
+            - mapping: 'root = ""' # empty 401 body
+          sync_response: {}
+      - output:
+          broker:
+            pattern: fan_out_sequential # Process sequentially to ensure Kafka write happens first
+            outputs:
+              - resource: lago_kafka_events_raw
+              - processors:
+                  - mapping: 'root = ""' # Return empty string
+                sync_response: {} # Immediately respond to HTTP request
+
+processor_resources:
+  # Fail-closed bearer auth for the ingest boundary. Shares INGEST_* with
+  # http.yml — the same trusted ingest boundary. Sets meta http_status, which the
+  # output switch and the input sync_response both read.
+  #   * INGEST_TOKEN        — the shared bearer the producer presents. Unset =>
+  #                           every request is rejected (fail-closed).
+  #   * INGEST_AUTH_ENABLED — "false" disables auth for trusted-network dev only;
+  #                           anything else (default) enforces it.
+  - label: ingest_bearer_auth
+    mapping: |
+      let auth_enabled = "${INGEST_AUTH_ENABLED:true}"
+      let configured   = "${INGEST_TOKEN:}"
+      let presented    = meta("Authorization").or("")
+      let ok = if $auth_enabled != "true" { true } else {
+        $configured.length() > 0 && $presented == ("Bearer " + $configured)
+      }
+      meta http_status = if $ok { "200" } else { "401" }
+      root = this
+  - label: agent_usage_mapping
+    mapping: |
+      root.organization_id = "${ORGANIZATION_ID}"
+      root.external_subscription_id = this.event.external_subscription_id
+      # Deterministic on the producer side (tenant + subsystem + hour bucket).
+      # A fresh id on retry double-bills — the producer owns this, never here.
+      root.transaction_id = this.event.transaction_id
+      # Billable-metric code, e.g. agent_tokens (sum) or agent_tool_calls (count).
+      root.code = this.event.code
+      root.timestamp = this.event.timestamp
+      # {value: <tokens>|1} — must match the billable metric's aggregation field.
+      root.properties = this.event.properties
+      # Per-actor attribution (§4 per-user metering). Carried VERBATIM from the
+      # producer's audit record (actor on every routing_decision + tool_invoke).
+      # The tenant boundary stays server-side (organization_id above), so actor is
+      # a sub-dimension WITHIN the tenant, never a way to select another tenant.
+      # Omitted entirely when the producer sends no actor, so it is additive and
+      # non-breaking for existing producers.
+      root.actor = this.event.actor.or(deleted())
+      root.ingested_at = timestamp_unix()
+
+output_resources:
+  - label: lago_kafka_events_raw
+    kafka_franz:
+      seed_brokers: ["${KAFKA_BROKERS}"]
+      topic: "${KAFKA_TOPIC}"
+      key: '${! json("organization_id") }-${! json("external_subscription_id") }'
+      tls:
+        enabled: ${KAFKA_TLS:false}
+      sasl:
+        - mechanism: SCRAM-SHA-512
+          username: "${KAFKA_USER}"
+          password: "${KAFKA_PASSWORD}"
+      batching:
+        count: ${KAFKA_BATCH_COUNT:100}
+        byte_size: ${KAFKA_BATCH_BYTE_SIZE:1000000} # 1MB default
+        period: ${KAFKA_BATCH_PERIOD:1s}
+
+metrics:
+  prometheus: {}

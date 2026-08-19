@@ -20,7 +20,10 @@ and a gate for it so it can never escape again.
 - [ ] **Compose / Docker / shell** — all compose files validate; `hadolint`
       error-level clean; `shellcheck` error-level clean.
 - [ ] **Deploy** — Kamal is exactly **2.11.0**; `kamal config` renders;
-      `helm lint` and `helm template` succeed.
+      `helm lint` and `helm template` succeed; **`Gemfile.lock` is present,
+      tracked, un-drifted and resolves kamal 2.11.0**, `.ruby-version` pins the
+      Ruby CI installs, and the gate runs `BUNDLE_FROZEN=true` so it cannot
+      repair the lockfile it is judging.
 
 ## Tooling installed so nothing SKIPs
 
@@ -58,6 +61,16 @@ Per the ratchet rule, each integration ships with its own gate the day it's buil
 
 - [ ] **Middleware → Lago (inbound usage):** a new `connectors/<name>.yml` (Redpanda
       Connect). Auto-covered by `connectors-gate.sh`; pinning gate covers its deps.
+- [x] **Agent-plane metering (`/agent-usage`) — BOTH HALVES NOW EXIST.** The
+      ingest pipeline is `connectors/agent_usage.yml` (this repo). The producer
+      shipped in `langgraph-agents` as `agentic_core/lago_usage.py`, hooked into
+      `cost_governor.py::governed_record()`: hourly rollup per
+      (tenant, subsystem, actor, code) with a deterministic `transaction_id`,
+      no client-supplied `organization_id`, and a fire-and-forget POST on a
+      daemon thread so an ingest outage cannot fail the metered operation.
+      Lago-side setup (create the `agent_tokens` / `agent_tool_calls` billable
+      metrics on the organisation) is still a deploy step — see
+      `connectors/README.md`.
 - [x] **Lago → accounting (outbound) — BUILT (gate-first, all four ERPs).**
       The exactly-once contract is enforced in `integrations/accounting/`
       (`make accounting`): "given usage event X, the **selected** accounting target
@@ -101,14 +114,22 @@ Per the ratchet rule, each integration ships with its own gate the day it's buil
         route** (the 503 names the variable); `LAGO_MCP_ALLOW_INSECURE=true` is the
         explicit dev-only escape hatch, and a configured token beats it. `HEAD /`
         stays open for liveness and leaks nothing.
-  - [x] _OpenObserve self-heal wired._ Failures emit `level=error` records with
-        `service=lago` (the stream **is** the incident module). Register with
-        `langgraph-agents/deploy/observability/apply-alerts.sh lago`. The rail fires
-        from the **handler path**, because Contract A turns every failure into
-        structured non-2xx JSON — there is no 5xx or panic for an alert to key off,
-        so a crash-based rail would report nothing while the whole surface failed.
-        Caller mistakes log at `warn`, not `error`, so malformed tool calls don't
-        bury real faults; each record carries `destructive` for triage.
+  - [x] _OpenObserve self-heal wired AND shipped._ Failures emit `level=error`
+        records with `service.name=lago` (the incident module) to **two**
+        destinations: stderr (write-ahead JSON line) and, when the OTEL_* env is
+        set, OpenObserve over OTLP/HTTP via `integrations/mcp/observability.go`
+        (the same OpenTelemetry-log shipper `ach-payments`/`bigcapital-enterprise`
+        use; a unit test with an injected exporter pins `service.name=lago` and
+        that env-unset stays stderr-only). Register the estate rule with
+        `apply-alerts.sh default` — **not** `apply-alerts.sh lago`: behind a shared
+        collector all modules land in one `default` stream and module identity
+        comes from `service_name`, so a per-module `lago` rule would watch nothing.
+        The rail fires from the **handler path**, because Contract A turns every
+        failure into structured non-2xx JSON — there is no 5xx or panic for an
+        alert to key off, so a crash-based rail would report nothing while the
+        whole surface failed. Caller mistakes log at `warn`, not `error`, so
+        malformed tool calls don't bury real faults; each record carries
+        `destructive` for triage.
   - [x] _The gate enforces the invariant structurally_, not just by test: `make mcp`
         fails if a non-GET request is constructed outside `lagowriter.go`, or if
         `allowedWrites` stops being an explicit enumeration. Verified by injecting
@@ -126,6 +147,18 @@ Per the ratchet rule, each integration ships with its own gate the day it's buil
         the middleware's in-process tool table would invert the architecture. No
         middleware change is owed. `LAGO_MCP_TOKEN` is a deploy-time secret and
         stays out of git by design (see "Never put secrets in git").
+  - [x] _Containerized + on the estate network._ `integrations/mcp/Dockerfile`
+        (two-stage, CGO-free, non-root) and a `lago-mcp` service in
+        `deploy/docker-compose.production.yml` (`expose: 8037`, `LAGO_MCP_TOKEN`,
+        `LAGO_API_URL`/`LAGO_API_KEY`), joined to `erp_shared_network` — the same
+        two-network sidecar shape bigcapital ships. Registration downstream is not
+        enough on its own: `langgraph-agents/docker-compose.real.yml` dials
+        `http://lago-mcp:8037`, so without this service that name resolves to
+        nothing and every billing tool call fails at connect. Structurally covered
+        by the `pins` + `compose` gates. Live verification (a `curl -I` from a
+        container on `erp_shared_network` returning 200) is a deploy step; the
+        consumer side still needs its `GATEWAY_TOKENS` `lago` entry set to the same
+        token (a `langgraph-agents` change, tracked cross-repo).
   - [x] IGNORED (charter) — _the Rails billing engine (`api/`, `front/`) is an empty
         submodule here._ That is this repo's **scope**, not a gap in it: it is the
         Lago **deploy** repo (Kamal + Helm + compose + connectors + the Go
@@ -139,3 +172,21 @@ Per the ratchet rule, each integration ships with its own gate the day it's buil
 ### Ratchet log (add a line every time a bug slips through)
 
 - _2026-… — example: "smoke test added after an all-404 ASGI bug shipped green."_
+- _2026-08 — the MCP block shipped fully checked over a surface that had no
+  container and no log shipper: registration downstream was done but no
+  `Dockerfile`/compose service existed, and `level=error` records went to stderr
+  with nothing shipping them (and the registration command named a per-module
+  stream that cannot exist behind a shared collector). Closed by shipping
+  `integrations/mcp/Dockerfile` + the `lago-mcp` compose service and the
+  `observability.go` OTLP shipper, and corrected `apply-alerts.sh lago` →
+  `default`. Both are now their own checked boxes so the gap stays visible._
+- _2026-08 — the deploy gate asserted kamal 2.11.0 from `Gemfile` and
+  `.kamal/version` but never looked at `Gemfile.lock`, which is what
+  `bundle exec kamal` actually runs. Worse, when the lockfile check was first
+  added it could not fail: the gate's own `bundle exec` re-resolves and
+  REWRITES a missing/drifted `Gemfile.lock` before the checks read it, so
+  deleting the lockfile or drifting it to kamal 1.9.0 both stayed GREEN. Closed
+  by `export BUNDLE_FROZEN=true` (a gate must never mutate the artifact it
+  judges) plus running the static lockfile checks before anything invokes
+  bundler. Caught only by mutation-testing the new checks — a check that has
+  never been observed to go RED is not a check._

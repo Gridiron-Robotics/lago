@@ -5,31 +5,59 @@ input:
     path: /events
     allowed_verbs:
       - POST
-    # Authenticate the ingest endpoint. Without this, any peer that can reach
-    # :3000 could POST billing events. Fail closed: enabled by default — set the
-    # credentials before exposing it (INGEST_PASSWORD_HASH is a hash, not the
-    # plaintext; see connectors/README.md).
-    basic_auth:
-      enabled: ${INGEST_BASIC_AUTH_ENABLED:true}
-      username: "${INGEST_USERNAME}"
-      password_hash: "${INGEST_PASSWORD_HASH}"
-      algorithm: "${INGEST_PASSWORD_ALGORITHM:sha256}"
-      salt: "${INGEST_PASSWORD_SALT}"
+    # The HTTP status is driven by the in-pipeline auth check (meta http_status):
+    # 401 for an unauthenticated/forged event, 200 for an accepted one.
+    sync_response:
+      status: '${! meta("http_status").or("200") }'
 
 pipeline:
   processors:
+    # Authenticate FIRST, before the billing mapping. The redpanda-connect
+    # http_server input has no native auth field (an earlier `basic_auth:` block
+    # here was silently invalid — the pipeline refused to boot under the pinned
+    # connect image), so we verify the presented bearer in-pipeline against
+    # INGEST_TOKEN. Without this, any peer that can reach :3000 could POST
+    # billing events. Fail-closed: with INGEST_TOKEN unset, every request is
+    # rejected.
+    - resource: ingest_bearer_auth
     - resource: lago_event_mapping
 
 output:
-  broker:
-    pattern: fan_out_sequential # Process sequentially to ensure Kafka write happens first
-    outputs:
-      - resource: lago_kafka_events_raw
-      - processors:
-          - mapping: 'root = ""' # Return empty string
-        sync_response: {} # Immediately respond to HTTP request
+  # Route on the auth verdict. An unauthenticated event is answered 401 and is
+  # NEVER written to Kafka; only an accepted event fans out to the events topic.
+  switch:
+    cases:
+      - check: 'meta("http_status") != "200"'
+        output:
+          processors:
+            - mapping: 'root = ""' # empty 401 body
+          sync_response: {}
+      - output:
+          broker:
+            pattern: fan_out_sequential # Process sequentially to ensure Kafka write happens first
+            outputs:
+              - resource: lago_kafka_events_raw
+              - processors:
+                  - mapping: 'root = ""' # Return empty string
+                sync_response: {} # Immediately respond to HTTP request
 
 processor_resources:
+  # Fail-closed bearer auth for the ingest boundary. Sets meta http_status, which
+  # the output switch and the input sync_response both read.
+  #   * INGEST_TOKEN        — the shared bearer callers present. Unset => every
+  #                           request is rejected (fail-closed).
+  #   * INGEST_AUTH_ENABLED — "false" disables auth for trusted-network dev only;
+  #                           anything else (default) enforces it.
+  - label: ingest_bearer_auth
+    mapping: |
+      let auth_enabled = "${INGEST_AUTH_ENABLED:true}"
+      let configured   = "${INGEST_TOKEN:}"
+      let presented    = meta("Authorization").or("")
+      let ok = if $auth_enabled != "true" { true } else {
+        $configured.length() > 0 && $presented == ("Bearer " + $configured)
+      }
+      meta http_status = if $ok { "200" } else { "401" }
+      root = this
   - label: lago_event_mapping
     mapping: |
       root.organization_id = "${ORGANIZATION_ID}"
@@ -38,7 +66,6 @@ processor_resources:
       root.code = this.event.code
       root.timestamp = this.event.timestamp
       root.properties = this.event.properties
-      root.ingested_at = timestamp_unix()
       root.precise_total_amount_cents = if this.event.precise_total_amount_cents.type() == "number" {
         this.event.precise_total_amount_cents
       } else {

@@ -59,6 +59,18 @@ func main() {
 		return
 	}
 
+	// Install the OTLP self-heal shipper before HTTPHandler builds its reporter,
+	// so level=error records on the tool surface reach OpenObserve. No-op unless
+	// the OTEL_* env is set; the shutdown flushes the last batch on a clean exit.
+	shutdownSelfHeal := mcp.InitSelfHeal(ctx)
+	defer func() {
+		flushCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if shutdownSelfHeal != nil {
+			_ = shutdownSelfHeal(flushCtx)
+		}
+	}()
+
 	// HTTP is the long-lived network transport; stdio runs alongside for desktop
 	// use and must never terminate the process on EOF (no stdin in a container).
 	hs := &http.Server{Addr: *httpAddr, Handler: server.HTTPHandler(), ReadHeaderTimeout: 10 * time.Second}

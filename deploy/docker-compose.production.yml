@@ -473,6 +473,53 @@ services:
       - --chromium-disable-javascript=true
       - --api-timeout=300s
 
+  # MCP sidecar — the native Contract A surface (GET /tools, POST /invoke,
+  # HEAD /) that exposes Lago billing as agent tools: 6 read tools, plus 4
+  # destructive write tools once LAGO_MCP_LAGO_API_KEY is set. The estate's
+  # billing-gateway dials it by name as `lago-mcp:8037` on erp_shared_network,
+  # so this service has to exist for any billing tool call from the agent plane
+  # to connect at all.
+  lago-mcp:
+    container_name: lago-mcp
+    build:
+      # Relative to THIS file's directory (deploy/), not the repo root.
+      context: ../integrations/mcp
+    # expose, never ports: this sidecar fronts a billing API key. It is reachable
+    # from the estate network by name and from nowhere else.
+    expose:
+      - '8037'
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      # In-stack hop; the api service's own healthcheck already proves :3000.
+      LAGO_API_URL: http://api:3000
+      # Downstream Lago org key this sidecar fronts. Unset => the 4 write tools
+      # are not registered at all, and the surface advertises 6 read tools.
+      LAGO_API_KEY: ${LAGO_MCP_LAGO_API_KEY:-}
+      # The bearer the brain presents, verified constant-time at the boundary.
+      # Unset => fail-closed: every /tools and /invoke request gets a 503 naming
+      # this variable, while HEAD / stays 200 so the healthcheck still passes.
+      # Never set LAGO_MCP_ALLOW_INSECURE here — it is a local-dev escape hatch.
+      LAGO_MCP_TOKEN: ${LAGO_MCP_TOKEN:-}
+      # Must stay non-empty and agree with `expose` above: empty means the
+      # process serves stdio only, binds no port, and exits on EOF.
+      LAGO_MCP_HTTP_ADDR: ':8037'
+      # OpenObserve self-heal shipper (observability.go). Unset => stderr-only,
+      # no OTLP send. Set the endpoint to ship level=error records so the estate
+      # alert can fire the langgraph diagnose->fix loop. OTEL_SERVICE_NAME is the
+      # incident module and MUST stay `lago`. The headers value carries a base64
+      # credential — it lives in deploy/.env.production, never in this file.
+      OTEL_SERVICE_NAME: lago
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      OTEL_EXPORTER_OTLP_HEADERS: ${OTEL_EXPORTER_OTLP_HEADERS:-}
+    networks:
+      # Local net for the hop to the Lago API...
+      default: {}
+      # ...and the ERP estate network where the brain resolves it by name.
+      erp_shared_network: {}
+
   portainer:
     image: portainer/portainer-ce:latest
     container_name: lago-portainer
@@ -496,3 +543,12 @@ services:
       - "traefik.http.services.portainer-service.loadbalancer.server.port=9000"
       - "traefik.http.routers.portainer.middlewares=portainer-stripprefix"
       - "traefik.http.middlewares.portainer-stripprefix.stripprefix.prefixes=/portainer"
+
+networks:
+  # The ERP estate network, created by the master compose (Erp/docker-compose.yml).
+  # Declared external so this module joins it rather than owning it: a
+  # compose-owned network would be project-prefixed and the brain would not
+  # resolve `lago-mcp` on it. Standalone bring-up needs it to exist first:
+  # `docker network create erp_shared_network`.
+  erp_shared_network:
+    external: true
