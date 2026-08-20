@@ -105,13 +105,13 @@ services:
       POSTGRES_SCHEMA: public
     volumes:
       - lago_postgres_data:/data/postgres
-    ports:
-      # Host side only. POSTGRES_PORT is lago's WHOLE-STACK port variable —
-      # PGPORT, DATABASE_URL and the healthcheck all read it — so retargeting
-      # it to deconflict a host binding would move the port inside the
-      # container too. That works, because lago is self-consistent, but it is
-      # far more blast radius than a host collision warrants.
-      - ${LAGO_HOST_PORT_5432:-${POSTGRES_PORT:-5432}}:${POSTGRES_PORT:-5432}
+    # NO HOST BINDING. The comment that used to sit here explained why the
+    # CONTAINER-side port must not move (POSTGRES_PORT/REDIS_PORT are lago's
+    # whole-stack variables). That reasoning was right and is untouched — what
+    # changed is that the HOST side is gone entirely, because :5432 was claimed
+    # by three repos at once and a whole-estate `up` had them fight.
+    # In-network this is `db:5432`. For a local shell: docker compose exec db psql -U lago
+    # For a host port on a dev box, add a compose.override.yml.
 
   redis:
     <<: *redis-image
@@ -125,10 +125,13 @@ services:
     command: --port ${REDIS_PORT:-6379}
     volumes:
       - lago_redis_data:/data
-    ports:
-      # Host side only — see the postgres binding above. REDIS_PORT is read by
-      # REDIS_URL and by the redis-cli healthcheck.
-      - ${LAGO_HOST_PORT_6379:-${REDIS_PORT:-6379}}:${REDIS_PORT:-6379}
+    # NO HOST BINDING. The comment that used to sit here explained why the
+    # CONTAINER-side port must not move (POSTGRES_PORT/REDIS_PORT are lago's
+    # whole-stack variables). That reasoning was right and is untouched — what
+    # changed is that the HOST side is gone entirely, because :6379 was claimed
+    # by three repos at once and a whole-estate `up` had them fight.
+    # In-network this is `redis:6379`. For a local shell: docker compose exec redis redis-cli
+    # For a host port on a dev box, add a compose.override.yml.
 
   migrate:
     <<: *backend-image
@@ -166,7 +169,7 @@ services:
     volumes:
       - lago_storage_data:/app/storage
     ports:
-      - "${LAGO_HOST_PORT_3000:-${API_PORT:-3000}}:3000"
+      - "${LAGO_API_PORT:-13640}:3000"
 
   front:
     <<: *frontend-image
@@ -181,7 +184,7 @@ services:
     environment:
       <<: [*frontend-env, *lago-api-url, *lago-front-url]
     ports:
-      - "${LAGO_HOST_PORT_80:-${FRONT_PORT:-80}}:80"
+      - "${LAGO_FRONT_PORT:-13641}:80"
     #  - 443:443
     # Using SSL with Let's Encrypt
     # volumes:
